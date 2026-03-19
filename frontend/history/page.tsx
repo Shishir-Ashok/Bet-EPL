@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { format } from "date-fns";
-import { getBetHistory, type Bet } from "@/lib/supabase";
+import { getBetHistory, type Bet } from "../../lib/supabase";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -47,12 +47,19 @@ export default function HistoryPage() {
   const [filter, setFilter] = useState<Filter>("all");
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    getBetHistory(200).then((data) => {
-      setBets(data);
-      setLoading(false);
-    });
+    getBetHistory(200)
+      .then((data) => {
+        setBets(data);
+        setLoading(false);
+      })
+      .catch((err) => {
+        console.error("History fetch error:", err);
+        setError(err?.message || String(err));
+        setLoading(false);
+      });
   }, []);
 
   const filtered = bets
@@ -173,6 +180,20 @@ export default function HistoryPage() {
           {filtered.length} result{filtered.length !== 1 ? "s" : ""}
         </span>
       </div>
+
+      {/* Error state */}
+      {error && (
+        <div className="card px-6 py-4 border-loss bg-loss-bg">
+          <p className="text-sm font-medium text-loss mb-1">
+            Failed to load bet history
+          </p>
+          <p className="text-xs font-mono text-loss/70">{error}</p>
+          <p className="text-xs text-muted mt-2">
+            Check that NEXT_PUBLIC_SUPABASE_URL and
+            NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY are set in Vercel.
+          </p>
+        </div>
+      )}
 
       {/* Table */}
       <div className="card overflow-hidden">

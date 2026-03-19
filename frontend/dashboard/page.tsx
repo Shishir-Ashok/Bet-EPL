@@ -22,7 +22,7 @@ import {
   getWallet,
   type DailyPnl,
   type TeamRecord,
-} from "@/lib/supabase";
+} from "../../lib/supabase";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -75,19 +75,27 @@ export default function DashboardPage() {
   const [teams, setTeams] = useState<TeamRecord[]>([]);
   const [wallet, setWallet] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
-    const days = periodToDays(period);
-    const [d, t, w] = await Promise.all([
-      getDailyPnl(days),
-      getTeamRecords(),
-      getWallet(),
-    ]);
-    setDaily(d);
-    setTeams(t);
-    setWallet(w);
-    setLoading(false);
+    setError(null);
+    try {
+      const days = periodToDays(period);
+      const [d, t, w] = await Promise.all([
+        getDailyPnl(days),
+        getTeamRecords(),
+        getWallet(),
+      ]);
+      setDaily(d);
+      setTeams(t);
+      setWallet(w);
+    } catch (err: any) {
+      console.error("Dashboard fetch error:", err);
+      setError(err?.message || String(err));
+    } finally {
+      setLoading(false);
+    }
   }, [period]);
 
   useEffect(() => {
@@ -211,6 +219,21 @@ export default function DashboardPage() {
           </div>
         ))}
       </div>
+
+      {/* Error state */}
+      {error && (
+        <div className="card px-6 py-4 border-loss bg-loss-bg">
+          <p className="text-sm font-medium text-loss mb-1">
+            Failed to load dashboard data
+          </p>
+          <p className="text-xs font-mono text-loss/70">{error}</p>
+          <p className="text-xs text-muted mt-2">
+            Check that NEXT_PUBLIC_SUPABASE_URL and
+            NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY are set in Vercel → Settings →
+            Environment Variables, then redeploy.
+          </p>
+        </div>
+      )}
 
       {/* Cumulative P&L chart */}
       <div className="card px-6 py-5">

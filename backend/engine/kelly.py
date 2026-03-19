@@ -27,11 +27,13 @@ from __future__ import annotations
 
 # Minimum edge required to place a bet (after de-vig).
 # Below this the variance isn't worth it even if Kelly suggests a positive stake.
-MIN_EDGE       = 0.03   # 3%
+MIN_EDGE       = 0.02   # 2% — lowered from 3% to find more bets.
+                        # Our edge estimates have uncertainty; 3% was
+                        # filtering out genuine value at 2-3% edge.
 
-# Fraction of full Kelly to use. 25% is conservative and appropriate
-# for a model with uncertain calibration.
-KELLY_FRACTION = 0.25
+# Fraction of full Kelly to use. 33% balances growth and risk for a
+# model with moderate calibration confidence.
+KELLY_FRACTION = 0.33
 
 # Hard cap — never risk more than 20% of bankroll on a single bet.
 MAX_BET_FRACTION = 0.20
