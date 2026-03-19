@@ -82,16 +82,23 @@ def get_or_create_team(team_data: dict) -> int:
     if existing.data:
         return existing.data[0]["id"]
 
-    # Team not found — insert it
+    # Team not found by TLA — upsert on name to handle the case where
+    # the team exists under a slightly different TLA (e.g. promoted clubs
+    # whose TLA changed between seasons). on_conflict="name" updates the
+    # TLA and crest without creating a duplicate row.
     new_team = {
         "name":       team_data.get("name", tla),
         "short_name": team_data.get("shortName", tla),
         "tla":        tla,
         "crest_url":  team_data.get("crest"),
     }
-    result = supabase.table("teams").insert(new_team).execute()
+    result = (
+        supabase.table("teams")
+        .upsert(new_team, on_conflict="name")
+        .execute()
+    )
     team_id = result.data[0]["id"]
-    print(f"  → Created new team: {new_team['name']} (id={team_id})")
+    print(f"  → Upserted team: {new_team['name']} (id={team_id})")
     return team_id
 
 
