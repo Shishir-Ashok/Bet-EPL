@@ -74,25 +74,25 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: python -m backend.data_pipeline.scrape_injuries
 
-      - name: Trigger bet placement on Render
-        # Wakes the Render service and tells it to run predictions + place bets
-        # The service may be sleeping (free tier spins down) — we retry 3 times
+      - name: Place bets on Render
+        # Calls /trigger/bet which runs predictions AND places virtual bets.
+        # /trigger/predict is predictions-only (for frontend display).
         env:
           RENDER_SERVICE_URL: ${{ secrets.RENDER_SERVICE_URL }}
           RENDER_API_SECRET: ${{ secrets.RENDER_API_SECRET }}
         run: |
           for i in 1 2 3; do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              -X POST "$RENDER_SERVICE_URL/trigger/predict" \
+              -X POST "$RENDER_SERVICE_URL/trigger/bet" \
               -H "X-API-Secret: $RENDER_API_SECRET" \
               --max-time 60)
             echo "Attempt $i: HTTP $STATUS"
             if [ "$STATUS" = "200" ]; then
-              echo "Render service triggered successfully"
+              echo "Bet placement triggered successfully"
               exit 0
             fi
             echo "Sleeping 30s before retry..."
             sleep 30
           done
           echo "Warning: Render service did not respond after 3 attempts"
-          exit 0  # Don't fail the workflow — predictions can run next time
+          exit 0

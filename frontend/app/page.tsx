@@ -1,4 +1,6 @@
 import { Suspense } from "react";
+
+export const dynamic = "force-dynamic";
 import Link from "next/link";
 import { getWallet, getUpcomingMatches, getRecentBets } from "@/lib/supabase";
 import { ClubBadge } from "@/components/ClubBadge";
@@ -226,7 +228,7 @@ export default async function HomePage() {
                         textColor: "text-profit",
                       },
                       {
-                        label: "",
+                        label: "Draw",
                         sublabel: "Draw",
                         prob: pd / total,
                         color: "bg-draw",

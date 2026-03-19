@@ -183,14 +183,15 @@ async def trigger_predict(background_tasks: BackgroundTasks) -> TriggerResponse:
 
 
 async def _run_predict():
+    """Saves predictions (probabilities) only — no bets placed."""
     try:
         from backend.engine.bet_placer import run
-        result = run()
+        result = run(place_bets=False)
         if result.get("error"):
             log.error(f"Predict pipeline error: {result['error']}")
         else:
-            log.info(f"Predict complete: {result.get('bets_placed',0)} bets placed, "
-                     f"balance €{result.get('balance', 0):.2f}")
+            log.info(f"Predictions saved for {result.get('matches_processed',0)} matches "
+                     f"(no bets placed — display only)")
     except Exception as e:
         log.error(f"Predict pipeline failed: {e}", exc_info=True)
 
@@ -199,24 +200,35 @@ async def _run_predict():
 
 
 
-@app.post("/debug/predict", dependencies=[Depends(verify_secret)])
-async def debug_predict():
+
+
+
+@app.post("/trigger/bet", dependencies=[Depends(verify_secret)])
+async def trigger_bet(background_tasks: BackgroundTasks) -> TriggerResponse:
     """
-    Runs bet_placer synchronously and returns the full result + any error.
-    Use this to diagnose why /trigger/predict returns 0 bets.
-    Remove after debugging.
+    Places actual virtual bets on upcoming matches.
+    Called by fetch_prematch.yml on matchdays only.
+
+    Separate from /trigger/predict so predictions (for frontend display)
+    never accidentally place bets.
     """
-    import traceback
+    log.info("POST /trigger/bet received")
+    background_tasks.add_task(_run_bet)
+    return ok("Bet placement started", {"mode": "background"})
+
+
+async def _run_bet():
+    """Places virtual bets where edge is found."""
     try:
         from backend.engine.bet_placer import run
-        result = run()
-        return {"status": "ok", "result": result}
+        result = run(place_bets=True)
+        if result.get("error"):
+            log.error(f"Bet pipeline error: {result['error']}")
+        else:
+            log.info(f"Bet complete: {result.get('bets_placed',0)} bets placed, "
+                     f"balance €{result.get('balance', 0):.2f}")
     except Exception as e:
-        return {
-            "status": "error",
-            "error": str(e),
-            "traceback": traceback.format_exc()
-        }
+        log.error(f"Bet pipeline failed: {e}", exc_info=True)
 
 @app.post("/trigger/settle", dependencies=[Depends(verify_secret)])
 async def trigger_settle(background_tasks: BackgroundTasks) -> TriggerResponse:

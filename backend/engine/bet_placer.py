@@ -161,12 +161,18 @@ def place_bet(
     update_wallet(new_balance, stake)
 
 
-def run() -> dict:
+def run(place_bets: bool = True) -> dict:
     """
-    Main entry point — runs the full prediction and betting pipeline
-    for all upcoming scheduled matches.
+    Main entry point — runs predictions for all upcoming matches.
 
-    Returns a summary dict for the FastAPI response.
+    Parameters
+    ----------
+    place_bets : if True, places virtual bets when edge is found.
+                 if False, only saves predictions (probabilities) for
+                 the frontend display — no bets, no wallet changes.
+
+    The daily_odds workflow and manual triggers should use place_bets=False.
+    The fetch_prematch matchday workflow uses place_bets=True.
     """
     print("=" * 55)
     print("  Bet Placer — running prediction pipeline")
@@ -290,8 +296,8 @@ def run() -> dict:
         # ── 6. Save prediction ────────────────────────────────────────────────
         pred_id = save_prediction(match["id"], probs, action, confidence, model_version)
 
-        # ── 7. Place bet if confirmed ─────────────────────────────────────────
-        if bet and action != "PASS":
+        # ── 7. Place bet only when betting is enabled ────────────────────────
+        if bet and action != "PASS" and place_bets:
             if balance < bet["stake"]:
                 print(f"    ⚠ Insufficient balance (€{balance:.2f} < €{bet['stake']:.2f})")
                 results.append({"match": f"{home} vs {away}", "action": "PASS", "reason": "insufficient balance"})
@@ -316,6 +322,10 @@ def run() -> dict:
                 "odds":   bet["odds"],
                 "edge":   bet["edge"],
             })
+        elif bet and action != "PASS" and not place_bets:
+            # Prediction saved but no bet placed — display-only mode
+            print(f"    → Prediction: {action}  edge {bet['edge']:.1%}  (display only — no bet)")
+            results.append({"match": f"{home} vs {away}", "action": action, "display_only": True})
         else:
             print(f"    → PASS")
             results.append({"match": f"{home} vs {away}", "action": "PASS"})
