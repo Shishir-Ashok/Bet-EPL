@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { getWallet, getUpcomingMatches, getRecentBets } from "@/lib/supabase";
+import { ClubBadge } from "@/components/ClubBadge";
 import { format, formatDistanceToNow } from "date-fns";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -189,21 +190,24 @@ export default async function HomePage() {
                 >
                   {/* Teams + kickoff */}
                   <div className="flex-1 min-w-0">
-                    {/* TLA badges */}
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-subtle border border-border text-muted">
-                        {match.home_tla}
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <ClubBadge
+                        crest={(match as any).home_crest}
+                        tla={match.home_tla}
+                        size="md"
+                      />
+                      <span className="font-display font-semibold text-primary text-sm">
+                        {match.home_team}
                       </span>
-                      <span className="text-muted text-xs">vs</span>
-                      <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-subtle border border-border text-muted">
-                        {match.away_tla}
+                      <span className="text-muted text-xs font-normal">vs</span>
+                      <ClubBadge
+                        crest={(match as any).away_crest}
+                        tla={match.away_tla}
+                        size="md"
+                      />
+                      <span className="font-display font-semibold text-primary text-sm">
+                        {match.away_team}
                       </span>
-                    </div>
-                    {/* Full names */}
-                    <div className="font-display font-semibold text-primary text-sm leading-tight">
-                      {match.home_team}{" "}
-                      <span className="text-muted font-normal">vs</span>{" "}
-                      {match.away_team}
                     </div>
                     <p className="text-xs text-muted mt-0.5">
                       {format(kickoff, "EEE d MMM")} ·{" "}
@@ -320,16 +324,22 @@ export default async function HomePage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border">
-                  {["Match", "Action", "Odds", "Stake", "Outcome", "P&L"].map(
-                    (h) => (
-                      <th
-                        key={h}
-                        className="px-5 py-3 text-left text-xs font-semibold text-muted"
-                      >
-                        {h}
-                      </th>
-                    ),
-                  )}
+                  {[
+                    "Date",
+                    "Match",
+                    "Action",
+                    "Odds",
+                    "Stake",
+                    "Outcome",
+                    "P&L",
+                  ].map((h) => (
+                    <th
+                      key={h}
+                      className="px-5 py-3 text-left text-xs font-semibold text-muted"
+                    >
+                      {h}
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
@@ -342,15 +352,41 @@ export default async function HomePage() {
                       key={bet.id}
                       className="border-b border-border/50 table-row-hover last:border-0"
                     >
-                      <td className="px-5 py-3.5">
-                        <span className="font-medium text-primary">
-                          {m?.home?.tla} vs {m?.away?.tla}
-                        </span>
-                        <p className="text-xs text-muted mt-0.5">
+                      {/* Date */}
+                      <td className="px-5 py-3.5 whitespace-nowrap">
+                        <span className="text-xs tabular text-muted">
                           {m?.kickoff_time
                             ? format(new Date(m.kickoff_time), "dd MMM yy")
                             : "—"}
-                        </p>
+                        </span>
+                      </td>
+                      {/* Match — home right | vs | away left */}
+                      <td className="px-5 py-3.5">
+                        <div className="flex items-center gap-2 w-52">
+                          <div className="flex items-center justify-end gap-1.5 flex-1 min-w-0">
+                            <span className="font-medium text-primary text-xs truncate">
+                              {m?.home?.tla}
+                            </span>
+                            <ClubBadge
+                              crest={m?.home?.crest_url}
+                              tla={m?.home?.tla ?? "?"}
+                              size="sm"
+                            />
+                          </div>
+                          <span className="text-muted text-[10px] font-semibold w-5 text-center flex-shrink-0">
+                            vs
+                          </span>
+                          <div className="flex items-center justify-start gap-1.5 flex-1 min-w-0">
+                            <ClubBadge
+                              crest={m?.away?.crest_url}
+                              tla={m?.away?.tla ?? "?"}
+                              size="sm"
+                            />
+                            <span className="font-medium text-primary text-xs truncate">
+                              {m?.away?.tla}
+                            </span>
+                          </div>
+                        </div>
                       </td>
                       <td className="px-5 py-3.5">
                         <span className="text-xs font-mono font-medium text-muted">

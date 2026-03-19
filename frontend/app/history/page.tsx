@@ -5,6 +5,7 @@ import { format } from "date-fns";
 import { getBetHistory, type Bet } from "@/lib/supabase";
 import { useSortable } from "@/lib/useSortable";
 import { SortTh } from "@/components/SortTh";
+import { ClubBadge } from "@/components/ClubBadge";
 
 type Filter = "all" | "win" | "loss" | "open";
 
@@ -288,11 +289,34 @@ export default function HistoryPage() {
                             : "—"}
                         </span>
                       </td>
-                      <td className="px-5 py-3.5 whitespace-nowrap">
-                        <div className="flex items-center gap-1.5 font-medium text-primary">
-                          <span>{m?.home?.short_name ?? "?"}</span>
-                          <span className="text-muted text-xs">vs</span>
-                          <span>{m?.away?.short_name ?? "?"}</span>
+                      <td className="px-5 py-3.5">
+                        <div className="flex items-center gap-2 w-72">
+                          {/* Home — right-aligned */}
+                          <div className="flex items-center justify-end gap-1.5 flex-1 min-w-0">
+                            <span className="font-medium text-primary text-xs truncate">
+                              {m?.home?.short_name ?? "?"}
+                            </span>
+                            <ClubBadge
+                              crest={m?.home?.crest_url}
+                              tla={m?.home?.tla ?? "?"}
+                              size="sm"
+                            />
+                          </div>
+                          {/* vs — fixed centre */}
+                          <span className="text-muted text-[10px] font-semibold w-5 text-center flex-shrink-0">
+                            vs
+                          </span>
+                          {/* Away — left-aligned */}
+                          <div className="flex items-center justify-start gap-1.5 flex-1 min-w-0">
+                            <ClubBadge
+                              crest={m?.away?.crest_url}
+                              tla={m?.away?.tla ?? "?"}
+                              size="sm"
+                            />
+                            <span className="font-medium text-primary text-xs truncate">
+                              {m?.away?.short_name ?? "?"}
+                            </span>
+                          </div>
                         </div>
                       </td>
                       <td className="px-5 py-3.5">

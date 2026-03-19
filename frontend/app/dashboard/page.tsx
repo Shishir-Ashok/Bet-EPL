@@ -25,6 +25,7 @@ import {
 } from "@/lib/supabase";
 import { useSortable } from "@/lib/useSortable";
 import { SortTh } from "@/components/SortTh";
+import { ClubBadge } from "@/components/ClubBadge";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -504,12 +505,11 @@ export default function DashboardPage() {
                 >
                   <td className="px-5 py-3.5">
                     <div className="flex items-center gap-2.5">
-                      <div
-                        className="w-6 h-6 rounded-full bg-subtle border border-border
-                                      flex items-center justify-center text-[9px] font-bold text-muted"
-                      >
-                        {team.tla}
-                      </div>
+                      <ClubBadge
+                        crest={team.crest_url}
+                        tla={team.tla}
+                        size="md"
+                      />
                       <span className="font-medium text-primary">
                         {team.team_name}
                       </span>

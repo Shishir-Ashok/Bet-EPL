@@ -33,8 +33,8 @@ export interface Bet {
   matches?: {
     kickoff_time: string;
     season: string;
-    home: { name: string; short_name: string; tla: string };
-    away: { name: string; short_name: string; tla: string };
+    home: { name: string; short_name: string; tla: string; crest_url?: string };
+    away: { name: string; short_name: string; tla: string; crest_url?: string };
   };
 }
 
@@ -51,6 +51,7 @@ export interface TeamRecord {
   team_id: number;
   team_name: string;
   tla: string;
+  crest_url?: string;
   total_bets: number;
   total_pnl: number;
   wins: number;
@@ -63,8 +64,10 @@ export interface UpcomingMatch {
   kickoff_time: string;
   home_team: string;
   home_tla: string;
+  home_crest?: string;
   away_team: string;
   away_tla: string;
+  away_crest?: string;
   home_odds: number | null;
   draw_odds: number | null;
   away_odds: number | null;
@@ -113,12 +116,23 @@ export async function getDailyPnl(days: number = 9999): Promise<DailyPnl[]> {
 }
 
 export async function getTeamRecords(): Promise<TeamRecord[]> {
-  const { data, error } = await supabase
-    .from("team_betting_record")
-    .select("*")
-    .order("total_pnl", { ascending: false });
-  if (error) throw new Error(`team_betting_record: ${error.message}`);
-  return data || [];
+  const [recordsRes, teamsRes] = await Promise.all([
+    supabase
+      .from("team_betting_record")
+      .select("*")
+      .order("total_pnl", { ascending: false }),
+    supabase.from("teams").select("tla, crest_url"),
+  ]);
+  if (recordsRes.error)
+    throw new Error(`team_betting_record: ${recordsRes.error.message}`);
+  const crestMap: Record<string, string> = {};
+  for (const t of teamsRes.data || []) {
+    if (t.tla && t.crest_url) crestMap[t.tla] = t.crest_url;
+  }
+  return (recordsRes.data || []).map((r: any) => ({
+    ...r,
+    crest_url: crestMap[r.tla],
+  }));
 }
 
 export async function getBetHistory(limit: number = 100): Promise<Bet[]> {
