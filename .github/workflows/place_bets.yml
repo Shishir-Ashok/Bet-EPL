@@ -1,0 +1,42 @@
+# .github/workflows/place_bets.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# PLACE BETS — updates wallet, records bets
+# Runs automatically on Fri/Sat/Sun/Mon/Tue/Wed at 10:00 UTC (after
+# predictions have been refreshed at 08:00).
+#
+# Can also be triggered manually from GitHub Actions UI at any time.
+# Only call this on actual matchdays — it deducts from the wallet.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Place matchday bets
+
+"on":
+  schedule:
+    # 10:00 UTC on matchdays — runs after daily_predictions at 08:00
+    - cron: "0 10 * * 2,3,5,6,0,1"
+  workflow_dispatch:
+
+jobs:
+  bet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Place bets on Render
+        env:
+          RENDER_SERVICE_URL: ${{ secrets.RENDER_SERVICE_URL }}
+          RENDER_API_SECRET: ${{ secrets.RENDER_API_SECRET }}
+        run: |
+          for i in 1 2 3; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X POST "$RENDER_SERVICE_URL/trigger/bet" \
+              -H "X-API-Secret: $RENDER_API_SECRET" \
+              --max-time 60)
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "Bets placed successfully"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "Warning: Render did not respond"
+          exit 0

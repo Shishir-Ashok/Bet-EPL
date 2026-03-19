@@ -1,30 +1,24 @@
-# .github/workflows/fetch_prematch.yml
+# .github/workflows/daily_predictions.yml
 # ─────────────────────────────────────────────────────────────────────────────
-# PRE-MATCH DATA PIPELINE
-# Fetches fixtures, odds and injuries. Does NOT place bets.
-# Betting is handled by place_bets.yml separately.
+# PREDICTIONS ONLY — no bets, no wallet changes
+# Runs every day at 08:00 UTC.
+#
+# Fetches latest fixtures + odds, then calls /trigger/predict on Render
+# which saves probabilities to the predictions table for the frontend.
+# The wallet is never touched by this workflow.
 # ─────────────────────────────────────────────────────────────────────────────
 
-name: Pre-match data pipeline
+name: Daily predictions refresh
 
 "on":
   schedule:
-    # 09:00 UTC — weekend matchdays
-    - cron: "0 9 * * 5,6,0,1"
-    # 09:00 UTC — midweek matchdays
-    - cron: "0 9 * * 2,3"
+    - cron: "0 8 * * *"
   workflow_dispatch:
-    inputs:
-      skip_odds:
-        description: "Skip odds fetch (saves API quota)"
-        required: false
-        default: "false"
-        type: boolean
 
 jobs:
-  fetch-prematch-data:
+  predict:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -37,23 +31,32 @@ jobs:
       - name: Install dependencies
         run: pip install -r backend/requirements.txt
 
-      - name: Fetch current season fixtures
+      - name: Fetch fixtures
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
         run: python -m backend.data_pipeline.fetch_fixtures --current
 
-      - name: Fetch pre-match odds
-        if: ${{ inputs.skip_odds != 'true' }}
+      - name: Fetch odds
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
         run: python -m backend.data_pipeline.fetch_odds
 
-      - name: Scrape injury news
+      - name: Save predictions (no bets)
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-        run: python -m backend.data_pipeline.scrape_injuries
+          RENDER_SERVICE_URL: ${{ secrets.RENDER_SERVICE_URL }}
+          RENDER_API_SECRET: ${{ secrets.RENDER_API_SECRET }}
+        run: |
+          for i in 1 2 3; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X POST "$RENDER_SERVICE_URL/trigger/predict" \
+              -H "X-API-Secret: $RENDER_API_SECRET" \
+              --max-time 60)
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then exit 0; fi
+            sleep 30
+          done
+          exit 0
