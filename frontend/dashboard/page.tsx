@@ -22,7 +22,7 @@ import {
   getWallet,
   type DailyPnl,
   type TeamRecord,
-} from "../../lib/supabase";
+} from "@/lib/supabase";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

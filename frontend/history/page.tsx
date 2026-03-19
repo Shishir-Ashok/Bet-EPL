@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { format } from "date-fns";
-import { getBetHistory, type Bet } from "../../lib/supabase";
+import { getBetHistory, type Bet } from "@/lib/supabase";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 

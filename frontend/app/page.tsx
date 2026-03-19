@@ -1,6 +1,6 @@
 import { Suspense } from "react";
 import Link from "next/link";
-import { getWallet, getUpcomingMatches, getRecentBets } from "../lib/supabase";
+import { getWallet, getUpcomingMatches, getRecentBets } from "@/lib/supabase";
 import { format, formatDistanceToNow } from "date-fns";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
