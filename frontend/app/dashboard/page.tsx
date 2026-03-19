@@ -378,7 +378,7 @@ export default function DashboardPage() {
           <h3 className="font-display font-semibold text-primary mb-1">
             Outcomes
           </h3>
-          <p className="text-xs text-muted mb-5">Win / Loss / Draw split</p>
+          <p className="text-xs text-muted mb-5">Win / Loss</p>
           {loading || pieData.length === 0 ? (
             <div className="h-44 flex items-center justify-center text-muted text-sm">
               {loading ? "Loading…" : "No data"}

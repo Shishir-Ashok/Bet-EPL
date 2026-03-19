@@ -226,7 +226,7 @@ export default async function HomePage() {
                         textColor: "text-profit",
                       },
                       {
-                        label: "Draw",
+                        label: "",
                         sublabel: "Draw",
                         prob: pd / total,
                         color: "bg-draw",

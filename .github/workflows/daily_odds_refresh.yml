@@ -1,0 +1,86 @@
+# .github/workflows/daily_odds_refresh.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# DAILY ODDS + PREDICTIONS REFRESH
+# Runs every day at 08:00 UTC.
+#
+# Keeps the frontend showing up-to-date probabilities for ALL upcoming
+# fixtures — not just on matchdays. Anyone visiting the site on any day
+# of the week sees the model's latest predictions.
+#
+# What it does:
+#   1. Fetches latest fixtures (catches reschedules and new announcements)
+#   2. Refreshes odds for all upcoming matches in the next 14 days
+#   3. Triggers Render to rerun predictions with the fresh odds
+#
+# API quota impact:
+#   The Odds API free tier = 500 requests/month.
+#   This workflow uses 1 request/day = ~30/month.
+#   The match-day workflows use ~2-4 requests each × ~10 matchdays = ~40/month.
+#   Total: ~70/month — well within the 500 limit.
+#
+# Render cold start:
+#   Free tier sleeps after 15 min inactivity. The curl retries 3 times
+#   with 30s gaps to handle the ~60s cold start wake time.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Daily odds and predictions refresh
+
+on:
+  schedule:
+    # 08:00 UTC every day
+    - cron: "0 8 * * *"
+
+  workflow_dispatch: # allow manual trigger anytime
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Refresh fixtures
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
+        run: python -m backend.data_pipeline.fetch_fixtures --current
+
+      - name: Refresh odds for upcoming matches
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
+        run: python -m backend.data_pipeline.fetch_odds
+
+      - name: Trigger predictions on Render
+        env:
+          RENDER_SERVICE_URL: ${{ secrets.RENDER_SERVICE_URL }}
+          RENDER_API_SECRET: ${{ secrets.RENDER_API_SECRET }}
+        run: |
+          for i in 1 2 3; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X POST "$RENDER_SERVICE_URL/trigger/predict" \
+              -H "X-API-Secret: $RENDER_API_SECRET" \
+              --max-time 60)
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "Predictions updated successfully"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "Warning: Render did not respond — predictions will update on next run"
+          exit 0
