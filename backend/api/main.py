@@ -186,13 +186,37 @@ async def _run_predict():
     try:
         from backend.engine.bet_placer import run
         result = run()
-        log.info(f"Predict complete: {result.get('bets_placed',0)} bets placed, "
-                 f"balance €{result.get('balance', 0):.2f}")
+        if result.get("error"):
+            log.error(f"Predict pipeline error: {result['error']}")
+        else:
+            log.info(f"Predict complete: {result.get('bets_placed',0)} bets placed, "
+                     f"balance €{result.get('balance', 0):.2f}")
     except Exception as e:
         log.error(f"Predict pipeline failed: {e}", exc_info=True)
 
 
 # ─── Trigger: settle bets ────────────────────────────────────────────────────
+
+
+
+@app.post("/debug/predict", dependencies=[Depends(verify_secret)])
+async def debug_predict():
+    """
+    Runs bet_placer synchronously and returns the full result + any error.
+    Use this to diagnose why /trigger/predict returns 0 bets.
+    Remove after debugging.
+    """
+    import traceback
+    try:
+        from backend.engine.bet_placer import run
+        result = run()
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
 
 @app.post("/trigger/settle", dependencies=[Depends(verify_secret)])
 async def trigger_settle(background_tasks: BackgroundTasks) -> TriggerResponse:
