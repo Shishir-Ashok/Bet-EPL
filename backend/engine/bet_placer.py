@@ -125,7 +125,8 @@ def save_prediction(
     model_version: str,
 ) -> int:
     """Saves the model's prediction to the predictions table. Returns prediction id."""
-    result = supabase.table("predictions").insert({
+    # Upsert so daily refreshes update the prediction rather than duplicate it
+    result = supabase.table("predictions").upsert({
         "match_id":             match_id,
         "model_version":        model_version,
         "prob_home":            probs["HOME"],
@@ -133,7 +134,7 @@ def save_prediction(
         "prob_away":            probs["AWAY"],
         "recommended_action":   action,
         "confidence":           confidence,
-    }).execute()
+    }, on_conflict="match_id,model_version").execute()
     return result.data[0]["id"]
 
 

@@ -21,15 +21,19 @@ name: Post-match results ingestion
 
 on:
   schedule:
-    # 08:00 UTC on Tuesday and Wednesday
-    - cron: "0 8 * * 2,3"
+    # 08:00 UTC on Tuesday — settles Monday/weekend matches
+    - cron: "0 8 * * 2"
+    # 08:00 UTC on Wednesday — settles Tuesday midweek matches
+    - cron: "0 8 * * 3"
+    # 08:00 UTC on Thursday — settles Wednesday midweek matches
+    - cron: "0 8 * * 4"
 
   workflow_dispatch:
     inputs:
       season:
-        description: 'Season to process (e.g. 2024-25)'
+        description: "Season to process (e.g. 2024-25)"
         required: false
-        default: '2024-25'
+        default: "2024-25"
 
 jobs:
   ingest-results:
@@ -52,14 +56,14 @@ jobs:
 
       - name: Fetch updated results
         env:
-          SUPABASE_URL:          ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SECRET_KEY:   ${{ secrets.SUPABASE_SECRET_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
         run: python -m backend.data_pipeline.fetch_fixtures --current
 
       - name: Scrape post-match stats (xG)
         env:
-          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: |
           SEASON=${{ inputs.season || '2024-25' }}
@@ -67,7 +71,7 @@ jobs:
 
       - name: Update ELO ratings
         env:
-          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: |
           SEASON=${{ inputs.season || '2024-25' }}
@@ -75,10 +79,10 @@ jobs:
 
       - name: Settle open bets + trigger RL reward signal
         env:
-          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-          RENDER_SERVICE_URL:  ${{ secrets.RENDER_SERVICE_URL }}
-          RENDER_API_SECRET:   ${{ secrets.RENDER_API_SECRET }}
+          RENDER_SERVICE_URL: ${{ secrets.RENDER_SERVICE_URL }}
+          RENDER_API_SECRET: ${{ secrets.RENDER_API_SECRET }}
         run: |
           for i in 1 2 3; do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
