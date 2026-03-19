@@ -3,11 +3,14 @@ backend/db.py
 -------------
 Single shared Supabase client for all backend scripts.
 
-Every pipeline script imports `supabase` from here — one place to
-manage the connection, one place to update if Supabase's SDK changes.
+supabase-py v2 quirk:
+  create_client(url, service_role_key) passes the key to the auth client
+  but does NOT automatically forward it as the Authorization Bearer header
+  on the PostgREST client. Without the explicit .auth() call below, every
+  DB write goes out as an anonymous request and RLS blocks it with 42501.
 
-The SECRET key is used throughout the backend because pipeline jobs
-need to write to the DB. The publishable key is only for the frontend.
+  supabase.postgrest.auth(_key) sets the Authorization header directly on
+  the PostgREST client so Postgres sees service_role and bypasses RLS.
 """
 
 import os
@@ -16,8 +19,8 @@ from supabase import create_client, Client
 
 load_dotenv()
 
-_url  = os.environ.get("SUPABASE_URL")
-_key  = os.environ.get("SUPABASE_SECRET_KEY")
+_url = os.environ.get("SUPABASE_URL")
+_key = os.environ.get("SUPABASE_SECRET_KEY")
 
 if not _url or not _key:
     raise EnvironmentError(
@@ -26,3 +29,8 @@ if not _url or not _key:
     )
 
 supabase: Client = create_client(_url, _key)
+
+# Explicitly set the service role key as the Bearer token on the PostgREST
+# client. This is what makes Postgres recognise the request as service_role
+# and bypass RLS for all write operations.
+supabase.postgrest.auth(_key)
