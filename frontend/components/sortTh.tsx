@@ -1,5 +1,4 @@
 "use client";
-
 import { type SortState } from "@/lib/useSortable";
 
 interface SortThProps {
