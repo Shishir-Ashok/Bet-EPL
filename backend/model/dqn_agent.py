@@ -235,7 +235,8 @@ class DQNAgent:
             )
         db_path    = result.data[0]["storage_path"]
         db_version = result.data[0]["version_tag"]
-        filename   = os.path.basename(db_path)
+        # Split on both / and \\ so Windows paths parse correctly on Linux
+        filename   = db_path.replace('\\', '/').split('/')[-1]
         local_path = os.path.join(MODEL_DIR, filename)
 
         if os.path.exists(db_path):
@@ -243,7 +244,7 @@ class DQNAgent:
         elif os.path.exists(local_path):
             path = local_path
             supabase.table("model_versions").update(
-                {"storage_path": os.path.abspath(local_path)}
+                {"storage_path": f"backend/model/checkpoints/{filename}"}
             ).eq("version_tag", db_version).execute()
         else:
             raise FileNotFoundError(
@@ -281,7 +282,8 @@ def _register_dqn(version_tag, save_path, metrics, avg_reward):
         "model_type":   "dqn",
         "avg_reward":   round(float(avg_reward), 4),
         "is_active":    True,
-        "storage_path": os.path.abspath(save_path),
+        # Store portable relative path so it works on any machine/OS
+        "storage_path": f"backend/model/checkpoints/{os.path.basename(save_path)}",
         "notes":        json.dumps(_sanitise(metrics)),
     }, on_conflict="version_tag").execute()
 

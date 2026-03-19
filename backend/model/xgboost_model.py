@@ -284,7 +284,8 @@ def load_model(version_tag: Optional[str] = None) -> CalibratedModel:
         # Try DB path first, then resolve filename against MODEL_DIR
         # This handles the case where the DB stores a Windows absolute path
         # but the model is running on Linux (Render)
-        filename = os.path.basename(db_path)
+        # Split on both / and \ so Windows paths parse correctly on Linux
+        filename = db_path.replace('\\', '/').replace('\\\\', '/').split('/')[-1]
         local_path = os.path.join(MODEL_DIR, filename)
 
         if os.path.exists(db_path):
@@ -293,7 +294,7 @@ def load_model(version_tag: Optional[str] = None) -> CalibratedModel:
             path = local_path
             # Update DB with the correct path for this environment
             supabase.table("model_versions").update(
-                {"storage_path": os.path.abspath(local_path)}
+                {"storage_path": f"backend/model/checkpoints/{filename}"}
             ).eq("version_tag", db_version).execute()
         else:
             raise FileNotFoundError(
@@ -352,7 +353,8 @@ def _register_model(version_tag, metrics, save_path, training_games):
         "training_games": training_games,
         "val_log_loss":   metrics["val_log_loss"],
         "is_active":      True,
-        "storage_path":   save_path,
+        # Store portable relative path so it works on any machine/OS
+        "storage_path":   f"backend/model/checkpoints/{os.path.basename(save_path)}",
         "notes":          json.dumps(metrics),
     }).execute()
 
