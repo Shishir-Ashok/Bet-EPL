@@ -25,16 +25,13 @@ ENV/
 # Only ignore the local cache directory.
 .uv/
 
-# ─── Model files — large binaries, stored separately ─────────────────────────
-# Trained model weights live in backend/model/checkpoints/
-# and are referenced by path in the model_versions DB table.
-# Do not commit them — they can be hundreds of MB.
-backend/model/checkpoints/
-*.pkl
+# ─── Model files ──────────────────────────────────────────────────────────────
+# .pkl and .pt files ARE committed — Render needs them to place bets.
+# Our models are small (~5MB total). Large models (>100MB) should use
+# Supabase Storage instead and be downloaded at runtime.
 *.joblib
-*.pt
-*.pth
 *.onnx
+*.pth
 
 # ─── Node / Next.js ──────────────────────────────────────────────────────────
 node_modules/
