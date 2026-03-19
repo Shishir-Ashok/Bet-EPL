@@ -222,7 +222,7 @@ class DQNAgent:
     def load_active(cls) -> "DQNAgent":
         result = (
             supabase.table("model_versions")
-            .select("storage_path")
+            .select("version_tag, storage_path")
             .eq("model_type", "dqn")
             .eq("is_active", True)
             .order("trained_at", desc=True)
@@ -233,8 +233,25 @@ class DQNAgent:
             raise FileNotFoundError(
                 "No active DQN model. Run: python -m backend.model.train --mode dqn"
             )
+        db_path    = result.data[0]["storage_path"]
+        db_version = result.data[0]["version_tag"]
+        filename   = os.path.basename(db_path)
+        local_path = os.path.join(MODEL_DIR, filename)
+
+        if os.path.exists(db_path):
+            path = db_path
+        elif os.path.exists(local_path):
+            path = local_path
+            supabase.table("model_versions").update(
+                {"storage_path": os.path.abspath(local_path)}
+            ).eq("version_tag", db_version).execute()
+        else:
+            raise FileNotFoundError(
+                f"DQN model not found at '{db_path}' or '{local_path}'. "
+                f"Ensure checkpoints are committed to the repo."
+            )
         agent = cls()
-        agent.load(result.data[0]["storage_path"])
+        agent.load(path)
         return agent
 
 

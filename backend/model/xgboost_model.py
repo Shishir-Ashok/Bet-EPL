@@ -253,13 +253,20 @@ def train(
 # ─── Inference ────────────────────────────────────────────────────────────────
 
 def load_model(version_tag: Optional[str] = None) -> CalibratedModel:
-    """Loads the active (or specified) XGBoost model from disk."""
+    """
+    Loads the active (or specified) XGBoost model from disk.
+
+    The storage_path in the DB may be an absolute path from the machine
+    that trained the model (e.g. a Windows path). We always try the DB
+    path first, then fall back to resolving the filename against MODEL_DIR
+    so Render (Linux) can find the file even if the DB path is a Windows path.
+    """
     if version_tag:
         path = os.path.join(MODEL_DIR, f"{version_tag}.pkl")
     else:
         result = (
             supabase.table("model_versions")
-            .select("storage_path")
+            .select("version_tag, storage_path")
             .eq("model_type", "xgboost")
             .eq("is_active", True)
             .order("trained_at", desc=True)
@@ -271,7 +278,28 @@ def load_model(version_tag: Optional[str] = None) -> CalibratedModel:
                 "No active XGBoost model. Run: "
                 "python -m backend.model.train --mode xgboost"
             )
-        path = result.data[0]["storage_path"]
+        db_path     = result.data[0]["storage_path"]
+        db_version  = result.data[0]["version_tag"]
+
+        # Try DB path first, then resolve filename against MODEL_DIR
+        # This handles the case where the DB stores a Windows absolute path
+        # but the model is running on Linux (Render)
+        filename = os.path.basename(db_path)
+        local_path = os.path.join(MODEL_DIR, filename)
+
+        if os.path.exists(db_path):
+            path = db_path
+        elif os.path.exists(local_path):
+            path = local_path
+            # Update DB with the correct path for this environment
+            supabase.table("model_versions").update(
+                {"storage_path": os.path.abspath(local_path)}
+            ).eq("version_tag", db_version).execute()
+        else:
+            raise FileNotFoundError(
+                f"Model file not found at '{db_path}' or '{local_path}'. "
+                f"Ensure checkpoints are committed to the repo."
+            )
 
     if not os.path.exists(path):
         raise FileNotFoundError(f"Model file not found: {path}")
