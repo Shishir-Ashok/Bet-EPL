@@ -93,7 +93,7 @@ export default async function HomePage() {
           </div>
           <p className="text-muted text-sm">
             Starting balance{" "}
-            <span className="tabular font-medium text-primary">€10.00</span>
+            <span className="tabular font-medium text-primary">€100.00</span>
             &nbsp;·&nbsp; Current balance{" "}
             <span className="tabular font-medium text-primary">
               €{fmt(balance)}
@@ -222,7 +222,7 @@ export default async function HomePage() {
                         textColor: "text-profit",
                       },
                       {
-                        label: "Draw",
+                        label: "",
                         sublabel: "Draw",
                         prob: pd / total,
                         color: "bg-draw",
