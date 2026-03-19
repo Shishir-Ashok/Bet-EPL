@@ -3,8 +3,8 @@
 import { useEffect, useState } from "react";
 import { format } from "date-fns";
 import { getBetHistory, type Bet } from "@/lib/supabase";
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+import { useSortable } from "@/lib/useSortable";
+import { SortTh } from "@/components/SortTh";
 
 type Filter = "all" | "win" | "loss" | "open";
 
@@ -25,12 +25,9 @@ function outcomeConfig(outcome: string | null) {
 }
 
 function actionLabel(action: string) {
-  const map: Record<string, string> = {
-    BET_HOME: "Home",
-    BET_DRAW: "Draw",
-    BET_AWAY: "Away",
-  };
-  return map[action] ?? action;
+  return (
+    { BET_HOME: "Home", BET_DRAW: "Draw", BET_AWAY: "Away" }[action] ?? action
+  );
 }
 
 function fmt(n: number, d = 2) {
@@ -40,23 +37,37 @@ function fmt(n: number, d = 2) {
   });
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
+type FlatBet = Bet & {
+  _kickoff: string;
+  _home: string;
+  _away: string;
+  _season: string;
+};
+
+function flatten(bets: Bet[]): FlatBet[] {
+  return bets.map((b) => ({
+    ...b,
+    _kickoff: b.matches?.kickoff_time ?? "",
+    _home: b.matches?.home?.short_name ?? "",
+    _away: b.matches?.away?.short_name ?? "",
+    _season: b.matches?.season ?? "",
+  }));
+}
 
 export default function HistoryPage() {
-  const [bets, setBets] = useState<Bet[]>([]);
+  const [bets, setBets] = useState<FlatBet[]>([]);
   const [filter, setFilter] = useState<Filter>("all");
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    getBetHistory(200)
+    getBetHistory(500)
       .then((data) => {
-        setBets(data);
+        setBets(flatten(data));
         setLoading(false);
       })
       .catch((err) => {
-        console.error("History fetch error:", err);
         setError(err?.message || String(err));
         setLoading(false);
       });
@@ -73,14 +84,19 @@ export default function HistoryPage() {
       if (!search) return true;
       const q = search.toLowerCase();
       return (
-        b.matches?.home?.short_name?.toLowerCase().includes(q) ||
-        b.matches?.away?.short_name?.toLowerCase().includes(q) ||
-        b.matches?.home?.tla?.toLowerCase().includes(q) ||
-        b.matches?.away?.tla?.toLowerCase().includes(q)
+        b._home.toLowerCase().includes(q) ||
+        b._away.toLowerCase().includes(q) ||
+        (b.matches?.home?.tla ?? "").toLowerCase().includes(q) ||
+        (b.matches?.away?.tla ?? "").toLowerCase().includes(q)
       );
     });
 
-  // Summary stats
+  const { sorted, sort, toggle } = useSortable<FlatBet>(
+    filtered,
+    "_kickoff",
+    "desc",
+  );
+
   const wins = bets.filter((b) => b.outcome === "WIN").length;
   const losses = bets.filter((b) => b.outcome === "LOSS").length;
   const open = bets.filter((b) => b.outcome === null).length;
@@ -88,7 +104,6 @@ export default function HistoryPage() {
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-10 space-y-8">
-      {/* Header */}
       <div>
         <h1 className="text-display-md font-display text-primary">
           Bet History
@@ -98,7 +113,6 @@ export default function HistoryPage() {
         </p>
       </div>
 
-      {/* Summary row */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
           {
@@ -125,9 +139,7 @@ export default function HistoryPage() {
         ))}
       </div>
 
-      {/* Filters + search */}
       <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
-        {/* Outcome filter */}
         <div className="flex items-center gap-1 bg-subtle rounded-xl p-1">
           {(["all", "win", "loss", "open"] as Filter[]).map((f) => (
             <button
@@ -149,8 +161,6 @@ export default function HistoryPage() {
             </button>
           ))}
         </div>
-
-        {/* Club search */}
         <div className="relative flex-1 max-w-xs">
           <svg
             className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted"
@@ -170,55 +180,71 @@ export default function HistoryPage() {
             placeholder="Search by team..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-9 pr-4 py-2 text-sm border border-border rounded-xl bg-surface
-                       text-primary placeholder:text-muted
-                       focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent"
+            className="w-full pl-9 pr-4 py-2 text-sm border border-border rounded-xl bg-surface text-primary placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent"
           />
         </div>
-
         <span className="text-sm text-muted ml-auto">
-          {filtered.length} result{filtered.length !== 1 ? "s" : ""}
+          {sorted.length} result{sorted.length !== 1 ? "s" : ""}
         </span>
       </div>
 
-      {/* Error state */}
       {error && (
-        <div className="card px-6 py-4 border-loss bg-loss-bg">
+        <div className="card px-6 py-4 bg-loss-bg">
           <p className="text-sm font-medium text-loss mb-1">
             Failed to load bet history
           </p>
           <p className="text-xs font-mono text-loss/70">{error}</p>
-          <p className="text-xs text-muted mt-2">
-            Check that NEXT_PUBLIC_SUPABASE_URL and
-            NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY are set in Vercel.
-          </p>
         </div>
       )}
 
-      {/* Table */}
       <div className="card overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border bg-subtle/40">
-                {[
-                  "Date",
-                  "Match",
-                  "Season",
-                  "Bet on",
-                  "Odds",
-                  "Stake",
-                  "Outcome",
-                  "P&L",
-                  "Balance after",
-                ].map((h) => (
-                  <th
-                    key={h}
-                    className="px-5 py-3 text-left text-xs font-semibold text-muted whitespace-nowrap"
-                  >
-                    {h}
-                  </th>
-                ))}
+                <SortTh
+                  label="Date"
+                  column="_kickoff"
+                  sort={sort}
+                  toggle={toggle}
+                />
+                <SortTh
+                  label="Match"
+                  column="_home"
+                  sort={sort}
+                  toggle={toggle}
+                />
+                <SortTh
+                  label="Season"
+                  column="_season"
+                  sort={sort}
+                  toggle={toggle}
+                />
+                <th className="px-5 py-3 text-left text-xs font-semibold text-muted">
+                  Bet on
+                </th>
+                <SortTh
+                  label="Odds"
+                  column="odds"
+                  sort={sort}
+                  toggle={toggle}
+                />
+                <SortTh
+                  label="Stake"
+                  column="stake"
+                  sort={sort}
+                  toggle={toggle}
+                />
+                <th className="px-5 py-3 text-left text-xs font-semibold text-muted">
+                  Outcome
+                </th>
+                <SortTh label="P&L" column="pnl" sort={sort} toggle={toggle} />
+                <SortTh
+                  label="Balance"
+                  column="balance_after"
+                  sort={sort}
+                  toggle={toggle}
+                />
               </tr>
             </thead>
             <tbody>
@@ -227,52 +253,41 @@ export default function HistoryPage() {
                   <tr key={i} className="border-b border-border/50">
                     {Array.from({ length: 9 }).map((_, j) => (
                       <td key={j} className="px-5 py-4">
-                        <div
-                          className="skeleton h-3 rounded"
-                          style={{ width: `${60 + Math.random() * 40}%` }}
-                        />
+                        <div className="skeleton h-3 rounded w-3/4" />
                       </td>
                     ))}
                   </tr>
                 ))}
 
-              {!loading && filtered.length === 0 && (
+              {!loading && sorted.length === 0 && (
                 <tr>
                   <td
                     colSpan={9}
                     className="px-5 py-12 text-center text-muted text-sm"
                   >
                     {bets.length === 0
-                      ? "No bets placed yet. The model will start betting when the next matchday begins."
+                      ? "No bets placed yet."
                       : "No bets match your filter."}
                   </td>
                 </tr>
               )}
 
               {!loading &&
-                filtered.map((bet) => {
+                sorted.map((bet) => {
                   const m = bet.matches;
                   const config = outcomeConfig(bet.outcome);
-                  const settled = bet.settled_at
-                    ? format(new Date(bet.settled_at), "dd MMM yy")
-                    : "—";
-                  const kickoff = m?.kickoff_time
-                    ? format(new Date(m.kickoff_time), "dd MMM yy")
-                    : "—";
-
                   return (
                     <tr
                       key={bet.id}
                       className={`border-b border-border/40 last:border-0 transition-colors duration-100 ${config.row}`}
                     >
-                      {/* Date */}
                       <td className="px-5 py-3.5 whitespace-nowrap">
                         <span className="text-xs tabular text-muted">
-                          {kickoff}
+                          {bet._kickoff
+                            ? format(new Date(bet._kickoff), "dd MMM yy")
+                            : "—"}
                         </span>
                       </td>
-
-                      {/* Match */}
                       <td className="px-5 py-3.5 whitespace-nowrap">
                         <div className="flex items-center gap-1.5 font-medium text-primary">
                           <span>{m?.home?.short_name ?? "?"}</span>
@@ -280,47 +295,33 @@ export default function HistoryPage() {
                           <span>{m?.away?.short_name ?? "?"}</span>
                         </div>
                       </td>
-
-                      {/* Season */}
                       <td className="px-5 py-3.5">
                         <span className="text-xs text-muted">
-                          {m?.season ?? "—"}
+                          {bet._season || "—"}
                         </span>
                       </td>
-
-                      {/* Bet on */}
                       <td className="px-5 py-3.5">
                         <span className="text-xs font-semibold px-2 py-0.5 rounded-md bg-accent-light text-accent border border-accent/20">
                           {actionLabel(bet.action)}
                         </span>
                       </td>
-
-                      {/* Odds */}
                       <td className="px-5 py-3.5">
-                        <span className="tabular font-mono text-xs text-primary">
+                        <span className="tabular font-mono text-xs">
                           {bet.odds.toFixed(2)}
                         </span>
                       </td>
-
-                      {/* Stake */}
                       <td className="px-5 py-3.5">
-                        <span className="tabular font-mono text-xs text-primary">
+                        <span className="tabular font-mono text-xs">
                           €{fmt(bet.stake)}
                         </span>
                       </td>
-
-                      {/* Outcome badge */}
                       <td className="px-5 py-3.5">
                         <span className={config.badge}>{config.label}</span>
                       </td>
-
-                      {/* P&L */}
                       <td className="px-5 py-3.5">
                         {bet.pnl != null ? (
                           <span
-                            className={`tabular font-mono text-xs font-bold ${
-                              bet.pnl >= 0 ? "text-profit" : "text-loss"
-                            }`}
+                            className={`tabular font-mono text-xs font-bold ${bet.pnl >= 0 ? "text-profit" : "text-loss"}`}
                           >
                             {bet.pnl >= 0 ? "+" : ""}€{fmt(Math.abs(bet.pnl))}
                           </span>
@@ -328,8 +329,6 @@ export default function HistoryPage() {
                           <span className="text-muted text-xs">—</span>
                         )}
                       </td>
-
-                      {/* Balance after */}
                       <td className="px-5 py-3.5">
                         <span className="tabular font-mono text-xs text-muted">
                           {bet.balance_after != null
@@ -345,15 +344,14 @@ export default function HistoryPage() {
         </div>
       </div>
 
-      {/* Legend */}
       <div className="flex flex-wrap gap-4 text-xs text-muted">
         <div className="flex items-center gap-2">
           <div className="w-3 h-3 rounded-sm bg-profit-bg border border-profit-border" />
-          Correct prediction (win)
+          Correct prediction
         </div>
         <div className="flex items-center gap-2">
           <div className="w-3 h-3 rounded-sm bg-loss-bg border border-loss-border" />
-          Incorrect prediction (loss)
+          Incorrect prediction
         </div>
         <div className="flex items-center gap-2">
           <div className="w-3 h-3 rounded-sm bg-pending-bg border border-border" />

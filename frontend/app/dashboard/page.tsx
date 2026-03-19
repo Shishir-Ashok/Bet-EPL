@@ -23,6 +23,8 @@ import {
   type DailyPnl,
   type TeamRecord,
 } from "@/lib/supabase";
+import { useSortable } from "@/lib/useSortable";
+import { SortTh } from "@/components/SortTh";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,7 +48,7 @@ function periodToDays(p: Period): number {
     "1y": 365,
     all: 9999,
   };
-  return map[p];
+  return map[p] ?? 9999;
 }
 
 // ─── Custom tooltip ───────────────────────────────────────────────────────────
@@ -139,6 +141,16 @@ export default function DashboardPage() {
       color: "#F59E0B",
     },
   ].filter((d) => d.value > 0);
+
+  const {
+    sorted: sortedTeams,
+    sort: teamSort,
+    toggle: teamToggle,
+  } = useSortable<TeamRecord>(
+    clubFilter === "all" ? teams : teams.filter((t) => t.tla === clubFilter),
+    "total_pnl",
+    "desc",
+  );
 
   const periods: { key: Period; label: string }[] = [
     { key: "today", label: "Today" },
@@ -446,23 +458,46 @@ export default function DashboardPage() {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border bg-subtle/30">
-                {["Club", "Bets", "Wins", "Losses", "Win rate", "P&L"].map(
-                  (h) => (
-                    <th
-                      key={h}
-                      className="px-5 py-3 text-left text-xs font-semibold text-muted"
-                    >
-                      {h}
-                    </th>
-                  ),
-                )}
+                <SortTh
+                  label="Club"
+                  column="team_name"
+                  sort={teamSort}
+                  toggle={teamToggle}
+                />
+                <SortTh
+                  label="Bets"
+                  column="total_bets"
+                  sort={teamSort}
+                  toggle={teamToggle}
+                />
+                <SortTh
+                  label="Wins"
+                  column="wins"
+                  sort={teamSort}
+                  toggle={teamToggle}
+                />
+                <SortTh
+                  label="Losses"
+                  column="losses"
+                  sort={teamSort}
+                  toggle={teamToggle}
+                />
+                <SortTh
+                  label="Win rate"
+                  column="win_rate_pct"
+                  sort={teamSort}
+                  toggle={teamToggle}
+                />
+                <SortTh
+                  label="P&L"
+                  column="total_pnl"
+                  sort={teamSort}
+                  toggle={teamToggle}
+                />
               </tr>
             </thead>
             <tbody>
-              {(clubFilter === "all"
-                ? teams
-                : teams.filter((t) => t.tla === clubFilter)
-              ).map((team) => (
+              {sortedTeams.map((team) => (
                 <tr
                   key={team.team_id}
                   className="border-b border-border/50 table-row-hover last:border-0"

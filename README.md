@@ -4,7 +4,7 @@ A self-running machine learning system that watches every Premier League match,
 predicts outcomes, places virtual bets, and learns from wins and losses — all
 on a free cloud stack with a public live dashboard.
 
-**Starting bankroll:** €10.00 &nbsp;|&nbsp; **Status:** [Live balance →](#)
+**Starting bankroll:** €100.00 &nbsp;|&nbsp; **Status:** [Live website →](https://bet-epl-phi.vercel.app/)
 
 ---
 
@@ -30,7 +30,7 @@ FBref / Understat  ──┘         │
                    Next.js Dashboard on Vercel
 ```
 
-The model never bets real money. The €10 is a virtual bankroll. All bets are
+The model never bets real money. The €100 is a virtual bankroll. All bets are
 hypothetical and logged for analysis.
 
 ---
@@ -138,7 +138,7 @@ Expected output:
       ✓ 20 teams upserted
 [3/3] Checking wallet...
       ✓ Wallet found
-        Balance:       €10.00
+        Balance:       €100.00
         Inception:     2024-xx-xx
 ```
 
@@ -147,7 +147,7 @@ Expected output:
 | Table           | Expected rows after bootstrap |
 | --------------- | ----------------------------- |
 | `teams`         | 20                            |
-| `wallet`        | 1 (€10.00 balance)            |
+| `wallet`        | 1 (€100.00 balance)           |
 | `matches`       | 0 (filled by Phase 2)         |
 | `bets`          | 0 (filled by Phase 3+)        |
 | everything else | 0                             |
@@ -156,16 +156,16 @@ Expected output:
 
 ## Phases
 
-| Phase | What gets built                                 | Status      |
-| ----- | ----------------------------------------------- | ----------- |
-| 1     | DB schema + Supabase setup                      | ✅ This doc |
-| 2     | Data pipeline (fixtures, odds, stats, injuries) | 🔜          |
-| 3     | XGBoost outcome predictor                       | 🔜          |
-| 4     | DQN betting agent                               | 🔜          |
-| 5     | Bet engine + virtual wallet                     | 🔜          |
-| 6     | FastAPI on Render                               | 🔜          |
-| 7     | Next.js frontend on Vercel                      | 🔜          |
-| 8     | GitHub Actions automation                       | 🔜          |
+| Phase | What gets built                                 |
+| ----- | ----------------------------------------------- |
+| 1     | DB schema + Supabase setup                      |
+| 2     | Data pipeline (fixtures, odds, stats, injuries) |
+| 3     | XGBoost outcome predictor                       |
+| 4     | DQN betting agent                               |
+| 5     | Bet engine + virtual wallet                     |
+| 6     | FastAPI on Render                               |
+| 7     | Next.js frontend on Vercel                      |
+| 8     | GitHub Actions automation                       |
 
 ---
 
@@ -183,14 +183,3 @@ Expected output:
 All comfortably within free limits.
 
 ---
-
-## Data model — key relationships
-
-```
-teams ──< matches (home_team_id, away_team_id)
-matches ──< odds
-matches ──< match_stats
-matches ──< predictions ──< bets
-predictions read from ──< rl_episodes (DQN training)
-wallet ←── updated by bets
-```
