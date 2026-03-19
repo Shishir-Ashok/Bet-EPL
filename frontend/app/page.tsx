@@ -1,6 +1,6 @@
 import { Suspense } from "react";
 import Link from "next/link";
-import { getWallet, getUpcomingMatches, getRecentBets } from "@/lib/supabase";
+import { getWallet, getUpcomingMatches, getRecentBets } from "../lib/supabase";
 import { format, formatDistanceToNow } from "date-fns";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -189,10 +189,21 @@ export default async function HomePage() {
                 >
                   {/* Teams + kickoff */}
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 font-display font-semibold text-primary">
-                      <span>{match.home_team}</span>
-                      <span className="text-muted font-normal text-sm">vs</span>
-                      <span>{match.away_team}</span>
+                    {/* TLA badges */}
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-subtle border border-border text-muted">
+                        {match.home_tla}
+                      </span>
+                      <span className="text-muted text-xs">vs</span>
+                      <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-subtle border border-border text-muted">
+                        {match.away_tla}
+                      </span>
+                    </div>
+                    {/* Full names */}
+                    <div className="font-display font-semibold text-primary text-sm leading-tight">
+                      {match.home_team}{" "}
+                      <span className="text-muted font-normal">vs</span>{" "}
+                      {match.away_team}
                     </div>
                     <p className="text-xs text-muted mt-0.5">
                       {format(kickoff, "EEE d MMM")} ·{" "}
@@ -200,24 +211,56 @@ export default async function HomePage() {
                     </p>
                   </div>
 
-                  {/* Probability bars */}
-                  <div className="flex-1 space-y-1.5">
+                  {/* Probability bars — Win / Draw / Loss from model */}
+                  <div className="flex-1 space-y-2 min-w-[180px]">
                     {[
-                      { label: "H", prob: ph / total, color: "bg-accent" },
-                      { label: "D", prob: pd / total, color: "bg-draw" },
-                      { label: "A", prob: pa / total, color: "bg-profit" },
-                    ].map(({ label, prob, color }) => (
-                      <div key={label} className="flex items-center gap-2">
-                        <span className="text-[10px] font-mono font-semibold text-muted w-3">
-                          {label}
-                        </span>
+                      {
+                        label: match.home_tla,
+                        sublabel: "Win",
+                        prob: ph / total,
+                        color: "bg-profit",
+                        textColor: "text-profit",
+                      },
+                      {
+                        label: "Draw",
+                        sublabel: "Draw",
+                        prob: pd / total,
+                        color: "bg-draw",
+                        textColor: "text-draw",
+                      },
+                      {
+                        label: match.away_tla,
+                        sublabel: "Win",
+                        prob: pa / total,
+                        color: "bg-loss",
+                        textColor: "text-loss",
+                      },
+                    ].map(({ label, sublabel, prob, color, textColor }) => (
+                      <div
+                        key={label + sublabel}
+                        className="flex items-center gap-2"
+                      >
+                        {/* Label */}
+                        <div className="w-20 flex-shrink-0">
+                          <span className="text-[10px] font-mono font-bold text-muted">
+                            {label}
+                          </span>
+                          <span className="text-[10px] text-muted">
+                            {" "}
+                            {sublabel}
+                          </span>
+                        </div>
+                        {/* Bar */}
                         <div className="flex-1 h-1.5 bg-subtle rounded-full overflow-hidden">
                           <div
                             className={`h-full rounded-full ${color} transition-all duration-700`}
                             style={{ width: `${(prob * 100).toFixed(1)}%` }}
                           />
                         </div>
-                        <span className="text-[10px] font-mono tabular text-muted w-8 text-right">
+                        {/* Percentage */}
+                        <span
+                          className={`text-xs font-mono font-bold tabular w-10 text-right ${textColor}`}
+                        >
                           {(prob * 100).toFixed(0)}%
                         </span>
                       </div>
