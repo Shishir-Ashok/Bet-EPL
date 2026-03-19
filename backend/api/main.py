@@ -43,6 +43,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
+
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 
 API_SECRET = os.environ.get("RENDER_API_SECRET")
@@ -265,6 +266,9 @@ async def _run_retrain(epochs: int, force_promote: bool):
 
 
 # ─── Status endpoints (no auth — safe to expose) ─────────────────────────────
+
+
+
 
 @app.get("/status/wallet")
 async def wallet_status():

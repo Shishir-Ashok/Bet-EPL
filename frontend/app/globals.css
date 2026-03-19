@@ -1,0 +1,135 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-bricolage: 'Bricolage Grotesque', sans-serif;
+    --font-jakarta:   'Plus Jakarta Sans', sans-serif;
+    --font-mono:      'JetBrains Mono', monospace;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply scroll-smooth;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  body {
+    @apply bg-background text-primary font-body antialiased;
+    font-feature-settings: 'rlig' 1, 'calt' 1;
+  }
+
+  /* Tabular numbers for financial data */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: 'tnum';
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-border rounded-full;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-muted;
+  }
+}
+
+@layer components {
+  /* Card base */
+  .card {
+    @apply bg-surface rounded-2xl border border-border shadow-card;
+  }
+
+  /* Stat card number */
+  .stat-value {
+    @apply text-display-md font-display tabular text-primary;
+  }
+
+  /* Badge variants */
+  .badge-profit {
+    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold
+           bg-profit-bg text-profit border border-profit-border;
+  }
+  .badge-loss {
+    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold
+           bg-loss-bg text-loss border border-loss-border;
+  }
+  .badge-draw {
+    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold
+           bg-draw-bg text-draw border border-draw-border;
+  }
+  .badge-pending {
+    @apply inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold
+           bg-pending-bg text-pending;
+  }
+
+  /* Button primary */
+  .btn-primary {
+    @apply inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-semibold text-sm
+           bg-accent text-white shadow-sm
+           hover:bg-accent-hover active:scale-95
+           transition-all duration-150;
+  }
+
+  /* Button secondary */
+  .btn-secondary {
+    @apply inline-flex items-center gap-2 px-5 py-2.5 rounded-xl font-semibold text-sm
+           bg-surface text-primary border border-border shadow-card
+           hover:bg-subtle active:scale-95
+           transition-all duration-150;
+  }
+
+  /* Section label */
+  .section-label {
+    @apply text-xs font-semibold tracking-widest uppercase text-muted;
+  }
+
+  /* Odds pill */
+  .odds-pill {
+    @apply px-2 py-0.5 rounded-md text-xs font-mono font-semibold tabular
+           bg-subtle text-primary border border-border;
+  }
+
+  /* Table row hover */
+  .table-row-hover {
+    @apply hover:bg-subtle/60 transition-colors duration-100 cursor-default;
+  }
+
+  /* Skeleton loader */
+  .skeleton {
+    @apply bg-border rounded animate-pulse;
+  }
+
+  /* Probability bar */
+  .prob-bar {
+    @apply h-1.5 rounded-full transition-all duration-500;
+  }
+
+  /* Filter pill */
+  .filter-pill {
+    @apply px-3.5 py-1.5 rounded-lg text-sm font-medium
+           border border-border text-muted
+           hover:border-accent hover:text-accent
+           transition-all duration-150 cursor-pointer;
+  }
+  .filter-pill.active {
+    @apply border-accent bg-accent-light text-accent;
+  }
+}
+
+/* Staggered animation helpers */
+.animate-delay-100 { animation-delay: 100ms; }
+.animate-delay-200 { animation-delay: 200ms; }
+.animate-delay-300 { animation-delay: 300ms; }
+.animate-delay-400 { animation-delay: 400ms; }
+.animate-delay-500 { animation-delay: 500ms; }
+.opacity-0-init    { opacity: 0; }

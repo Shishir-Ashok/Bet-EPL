@@ -1,4 +1,4 @@
-# PL Betting Bot 🤖⚽
+# PL Betting Bot
 
 A self-running machine learning system that watches every Premier League match,
 predicts outcomes, places virtual bets, and learns from wins and losses — all
@@ -94,7 +94,7 @@ pl-betting-bot/
 
 1. Go to [supabase.com](https://supabase.com) → New project
 2. Choose a name (e.g. `pl-betting-bot`) and a strong DB password
-3. Pick the **Frankfurt** region (closest to UK for PL data latency)
+3. Pick a region (closest to UK for PL data latency)
 4. Wait ~2 minutes for provisioning
 
 ### Step 2 — Run the schema migration
@@ -107,6 +107,7 @@ pl-betting-bot/
 ### Step 3 — Get your API keys
 
 From Supabase: **Settings → API**
+
 - Copy `Project URL` → `SUPABASE_URL`
 - Copy `anon / public` key → `SUPABASE_ANON_KEY`
 - Copy `service_role` key → `SUPABASE_SERVICE_KEY`
@@ -125,6 +126,7 @@ python scripts/bootstrap_db.py
 ```
 
 Expected output:
+
 ```
 =======================================================
   PL Betting Bot — Database Bootstrap
@@ -142,41 +144,41 @@ Expected output:
 
 ### Step 5 — Verify in Supabase Table Editor
 
-| Table          | Expected rows after bootstrap |
-|----------------|-------------------------------|
-| `teams`        | 20                            |
-| `wallet`       | 1 (€10.00 balance)            |
-| `matches`      | 0 (filled by Phase 2)         |
-| `bets`         | 0 (filled by Phase 3+)        |
-| everything else| 0                             |
+| Table           | Expected rows after bootstrap |
+| --------------- | ----------------------------- |
+| `teams`         | 20                            |
+| `wallet`        | 1 (€10.00 balance)            |
+| `matches`       | 0 (filled by Phase 2)         |
+| `bets`          | 0 (filled by Phase 3+)        |
+| everything else | 0                             |
 
 ---
 
 ## Phases
 
-| Phase | What gets built | Status |
-|-------|----------------|--------|
-| 1 | DB schema + Supabase setup | ✅ This doc |
-| 2 | Data pipeline (fixtures, odds, stats, injuries) | 🔜 |
-| 3 | XGBoost outcome predictor | 🔜 |
-| 4 | DQN betting agent | 🔜 |
-| 5 | Bet engine + virtual wallet | 🔜 |
-| 6 | FastAPI on Render | 🔜 |
-| 7 | Next.js frontend on Vercel | 🔜 |
-| 8 | GitHub Actions automation | 🔜 |
+| Phase | What gets built                                 | Status      |
+| ----- | ----------------------------------------------- | ----------- |
+| 1     | DB schema + Supabase setup                      | ✅ This doc |
+| 2     | Data pipeline (fixtures, odds, stats, injuries) | 🔜          |
+| 3     | XGBoost outcome predictor                       | 🔜          |
+| 4     | DQN betting agent                               | 🔜          |
+| 5     | Bet engine + virtual wallet                     | 🔜          |
+| 6     | FastAPI on Render                               | 🔜          |
+| 7     | Next.js frontend on Vercel                      | 🔜          |
+| 8     | GitHub Actions automation                       | 🔜          |
 
 ---
 
 ## Free tier limits
 
-| Service | Free limit | Our usage |
-|---------|-----------|-----------|
-| Supabase | 500MB DB, 1GB storage | ~5MB/season |
-| Vercel | Unlimited deploys, 100GB bandwidth | ~1GB/month |
-| Render | 750h/month (spins down) | ~2h/month |
-| GitHub Actions | 2,000 min/month | ~60 min/month |
-| football-data.org | 10 calls/min, all PL data | ~500/season |
-| The Odds API | 500 requests/month | ~380/season |
+| Service           | Free limit                         | Our usage     |
+| ----------------- | ---------------------------------- | ------------- |
+| Supabase          | 500MB DB, 1GB storage              | ~5MB/season   |
+| Vercel            | Unlimited deploys, 100GB bandwidth | ~1GB/month    |
+| Render            | 750h/month (spins down)            | ~2h/month     |
+| GitHub Actions    | 2,000 min/month                    | ~60 min/month |
+| football-data.org | 10 calls/min, all PL data          | ~500/season   |
+| The Odds API      | 500 requests/month                 | ~380/season   |
 
 All comfortably within free limits.
 
