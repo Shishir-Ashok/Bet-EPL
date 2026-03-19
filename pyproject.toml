@@ -1,0 +1,30 @@
+[project]
+name = "bet-epl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "apscheduler>=3.11.2",
+    "beautifulsoup4>=4.14.3",
+    "fastapi>=0.135.1",
+    "httpx>=0.28.1",
+    "lxml>=6.0.2",
+    "numpy>=2.4.3",
+    "pandas>=3.0.1",
+    "python-dotenv>=1.2.2",
+    "requests>=2.32.5",
+    "scikit-learn>=1.8.0",
+    "supabase>=2.28.2",
+    "torch>=2.10.0",
+    "uvicorn[standard]>=0.42.0",
+    "xgboost>=3.2.0",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

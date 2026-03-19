@@ -1,0 +1,80 @@
+# .github/workflows/weekly_retrain.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# WEEKLY MODEL RETRAINING
+# Runs every Monday at 06:00 UTC.
+#
+# What it does:
+#   1. Wakes the Render service and triggers a full retrain
+#   2. The Render service retrains XGBoost on all historical data
+#   3. Then runs one epoch of DQN training on the accumulated replay buffer
+#   4. Saves the new model to Supabase Storage and registers it in model_versions
+#   5. If the new model beats the current one on validation log-loss, it's
+#      promoted to active — otherwise the old model stays in place
+#
+# Why weekly and not daily?
+#   - The PL only plays ~3-4 matches per week. That's not enough new data
+#     to meaningfully retrain daily.
+#   - The DQN needs enough replay buffer entries to sample from.
+#     After a full weekend, we typically have 6-10 new episodes to add.
+#   - Render free tier has a 750h/month limit. Weekly retraining uses ~4h/month.
+#
+# Manual retraining (e.g. after a long break or season restart):
+#   Go to GitHub Actions → weekly_retrain → Run workflow
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Weekly model retraining
+
+on:
+  schedule:
+    # 06:00 UTC every Monday
+    - cron: "0 6 * * 1"
+
+  workflow_dispatch:
+    inputs:
+      force_promote:
+        description: 'Promote new model even if validation is worse'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Trigger retraining on Render
+        env:
+          RENDER_SERVICE_URL: ${{ secrets.RENDER_SERVICE_URL }}
+          RENDER_API_SECRET:  ${{ secrets.RENDER_API_SECRET }}
+        run: |
+          FORCE=${{ inputs.force_promote || 'false' }}
+          echo "Triggering weekly retrain (force_promote=$FORCE)..."
+
+          # Render free tier takes up to 60s to wake up from sleep.
+          # First request often times out — that's normal.
+          for i in 1 2 3 4 5; do
+            STATUS=$(curl -s -o response.json -w "%{http_code}" \
+              -X POST "$RENDER_SERVICE_URL/trigger/retrain" \
+              -H "X-API-Secret: $RENDER_API_SECRET" \
+              -H "Content-Type: application/json" \
+              -d "{\"force_promote\": $FORCE}" \
+              --max-time 90)
+            echo "Attempt $i: HTTP $STATUS"
+
+            if [ "$STATUS" = "200" ]; then
+              echo "Retraining triggered successfully"
+              cat response.json
+              exit 0
+            elif [ "$STATUS" = "202" ]; then
+              echo "Retraining accepted (async) — Render will run it in background"
+              exit 0
+            fi
+
+            WAIT=$((30 * i))
+            echo "Sleeping ${WAIT}s before retry..."
+            sleep $WAIT
+          done
+
+          echo "ERROR: Could not reach Render service after 5 attempts"
+          exit 1   # This one DOES fail loudly — retraining is important

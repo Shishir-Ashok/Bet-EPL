@@ -1,0 +1,32 @@
+# backend/requirements.txt
+# Install: pip install -r backend/requirements.txt
+
+# Supabase
+supabase==2.10.0
+python-dotenv==1.0.1
+
+# Data fetching
+requests==2.32.3
+beautifulsoup4==4.12.3
+lxml==5.2.2          # faster HTML parser for BeautifulSoup 
+aiohttp
+
+# Data wrangling
+pandas==2.2.3
+numpy==1.26.4
+
+# ML — XGBoost (outcome predictor layer)
+xgboost==2.1.1
+scikit-learn==1.5.2
+
+# ML — Deep Q-Network (betting agent layer)
+# backend/requirements.txt — Render uses this, NOT your local pyproject.toml
+torch==2.4.1+cpu  --index-url https://download.pytorch.org/whl/cpu
+
+# API server (Render)
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# Scheduling / utilities
+APScheduler==3.10.4
+httpx==0.27.2        # async HTTP for the FastAPI service

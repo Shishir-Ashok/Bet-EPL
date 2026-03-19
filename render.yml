@@ -1,0 +1,53 @@
+# render.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Render Blueprint — defines the free-tier web service for the FastAPI server.
+#
+# Deploy steps:
+#   1. Push this file to the root of your GitHub repo
+#   2. Go to render.com → New → Blueprint
+#   3. Connect your repo — Render will read this file automatically
+#   4. Add environment variables in the Render dashboard (Settings → Environment)
+#
+# Environment variables to add in Render dashboard:
+#   SUPABASE_URL          your Supabase project URL
+#   SUPABASE_SECRET_KEY   your Supabase secret key
+#   FOOTBALL_DATA_API_KEY football-data.org API key
+#   THE_ODDS_API_KEY      The Odds API key
+#   RENDER_API_SECRET     a strong random string — used to auth GitHub Actions
+#   ENV                   production
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  - type: web
+    name: pl-betting-bot-api
+    runtime: python
+    region: frankfurt # closest to UK for PL data sources
+    plan: free
+
+    buildCommand: pip install -r backend/requirements.txt
+
+    startCommand: >
+      uvicorn backend.api.main:app
+      --host 0.0.0.0
+      --port $PORT
+      --workers 1
+      --log-level info
+
+    # Health check — Render pings this to decide if the service is up.
+    # Must return 200 within 30 seconds of startup.
+    healthCheckPath: /health
+
+    # Auto-deploy when main branch is updated
+    autoDeploy: true
+
+    envVars:
+      - key: ENV
+        value: production
+      - key: PYTHONPATH
+        value: /opt/render/project/src
+      # Sensitive vars — add these manually in Render dashboard, not here
+      # - key: SUPABASE_URL
+      # - key: SUPABASE_SECRET_KEY
+      # - key: FOOTBALL_DATA_API_KEY
+      # - key: THE_ODDS_API_KEY
+      # - key: RENDER_API_SECRET

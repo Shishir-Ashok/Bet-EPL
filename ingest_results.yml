@@ -1,0 +1,96 @@
+# .github/workflows/ingest_results.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# POST-MATCH PIPELINE
+# Runs at 08:00 UTC Tuesday and Wednesday mornings.
+# By 08:00 UTC on Tuesday, all weekend PL matches will be FINISHED.
+# Wednesday covers any midweek matches.
+#
+# What it does:
+#   1. Fetches updated results from football-data.org (fills in scores)
+#   2. Scrapes xG and stats from Understat for newly finished matches
+#   3. Recalculates ELO ratings for all newly settled matches
+#   4. Settles open bets (marks WIN/LOSS, updates wallet)
+#
+# Why not run this immediately after matches finish?
+#   football-data.org can take 10-30 minutes to update scores after FT.
+#   Understat typically has xG data within a few hours of FT.
+#   Running at 08:00 the next morning guarantees both sources are ready.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Post-match results ingestion
+
+on:
+  schedule:
+    # 08:00 UTC on Tuesday and Wednesday
+    - cron: "0 8 * * 2,3"
+
+  workflow_dispatch:
+    inputs:
+      season:
+        description: 'Season to process (e.g. 2024-25)'
+        required: false
+        default: '2024-25'
+
+jobs:
+  ingest-results:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Fetch updated results
+        env:
+          SUPABASE_URL:          ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY:   ${{ secrets.SUPABASE_SECRET_KEY }}
+          FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
+        run: python -m backend.data_pipeline.fetch_fixtures --current
+
+      - name: Scrape post-match stats (xG)
+        env:
+          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          SEASON=${{ inputs.season || '2024-25' }}
+          python -m backend.data_pipeline.scrape_stats --season $SEASON
+
+      - name: Update ELO ratings
+        env:
+          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: |
+          SEASON=${{ inputs.season || '2024-25' }}
+          python -m backend.data_pipeline.update_elo --season $SEASON
+
+      - name: Settle open bets + trigger RL reward signal
+        env:
+          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          RENDER_SERVICE_URL:  ${{ secrets.RENDER_SERVICE_URL }}
+          RENDER_API_SECRET:   ${{ secrets.RENDER_API_SECRET }}
+        run: |
+          for i in 1 2 3; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X POST "$RENDER_SERVICE_URL/trigger/settle" \
+              -H "X-API-Secret: $RENDER_API_SECRET" \
+              --max-time 60)
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "Bet settlement triggered successfully"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "Warning: Render service did not respond — bets will settle on next run"
+          exit 0

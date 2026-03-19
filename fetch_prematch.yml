@@ -1,0 +1,94 @@
+# .github/workflows/fetch_prematch.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# PRE-MATCH PIPELINE
+# Runs at 09:00 UTC on days PL matches are scheduled (Fri–Mon covers all GWs).
+# This gives the model fresh data ~8 hours before typical 17:30 kickoffs.
+#
+# What it does:
+#   1. Fetches the current season's latest fixtures (catches any reschedules)
+#   2. Fetches pre-match odds from The Odds API
+#   3. Scrapes latest injury news from BBC Sport
+#
+# How to add more matchday triggers:
+#   PL also plays midweek (Tue/Wed for cup weeks). If you want to cover those,
+#   add "10 9 * * 2,3" to the schedule. For now Fri-Mon covers ~95% of GWs.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Pre-match data pipeline
+
+on:
+  schedule:
+    # 09:00 UTC on Friday, Saturday, Sunday, Monday
+    - cron: "0 9 * * 5,6,0,1"
+
+  # Also allow manual trigger from GitHub Actions UI (useful for testing)
+  workflow_dispatch:
+    inputs:
+      skip_odds:
+        description: 'Skip odds fetch (saves API quota)'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  fetch-prematch-data:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Fetch current season fixtures
+        env:
+          SUPABASE_URL:          ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY:   ${{ secrets.SUPABASE_SECRET_KEY }}
+          FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
+        run: python -m backend.data_pipeline.fetch_fixtures --current
+
+      - name: Fetch pre-match odds
+        if: ${{ inputs.skip_odds != 'true' }}
+        env:
+          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          THE_ODDS_API_KEY:    ${{ secrets.THE_ODDS_API_KEY }}
+        run: python -m backend.data_pipeline.fetch_odds
+
+      - name: Scrape injury news
+        env:
+          SUPABASE_URL:        ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: python -m backend.data_pipeline.scrape_injuries
+
+      - name: Trigger bet placement on Render
+        # Wakes the Render service and tells it to run predictions + place bets
+        # The service may be sleeping (free tier spins down) — we retry 3 times
+        env:
+          RENDER_SERVICE_URL: ${{ secrets.RENDER_SERVICE_URL }}
+          RENDER_API_SECRET:  ${{ secrets.RENDER_API_SECRET }}
+        run: |
+          for i in 1 2 3; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X POST "$RENDER_SERVICE_URL/trigger/predict" \
+              -H "X-API-Secret: $RENDER_API_SECRET" \
+              --max-time 60)
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "Render service triggered successfully"
+              exit 0
+            fi
+            echo "Sleeping 30s before retry..."
+            sleep 30
+          done
+          echo "Warning: Render service did not respond after 3 attempts"
+          exit 0  # Don't fail the workflow — predictions can run next time
