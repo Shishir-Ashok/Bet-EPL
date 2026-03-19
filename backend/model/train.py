@@ -46,8 +46,8 @@ from backend.model import replay_buffer
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-TRAIN_SEASONS = ["2020-21", "2021-22", "2022-23"]   # agent trains on these
-VAL_SEASON    = "2023-24"                            # agent NEVER trains on this
+TRAIN_SEASONS = ["2020-21", "2021-22", "2022-23", "2023-24"]  # agent trains on these
+VAL_SEASON    = "2024-25"                                            # agent NEVER trains on this
 
 DQN_EPOCHS         = 30
 STARTING_BALANCE   = 10.0
