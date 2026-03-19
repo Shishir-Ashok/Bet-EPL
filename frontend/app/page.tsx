@@ -1,22 +1,23 @@
-import { Suspense } from "react";
+"use client";
 
-export const dynamic = "force-dynamic";
+import { useEffect, useState } from "react";
 import Link from "next/link";
-import { getWallet, getUpcomingMatches, getRecentBets } from "@/lib/supabase";
+import { format } from "date-fns";
+import {
+  getWallet,
+  getUpcomingMatches,
+  getRecentBets,
+  type Wallet,
+  type UpcomingMatch,
+  type Bet,
+} from "@/lib/supabase";
 import { ClubBadge } from "@/components/ClubBadge";
-import { format, formatDistanceToNow } from "date-fns";
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function fmt(n: number, decimals = 2) {
+function fmt(n: number, d = 2) {
   return n.toLocaleString("en-IE", {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
+    minimumFractionDigits: d,
+    maximumFractionDigits: d,
   });
-}
-
-function pct(n: number) {
-  return (n * 100).toFixed(1) + "%";
 }
 
 function actionLabel(action: string | null) {
@@ -42,16 +43,23 @@ function actionLabel(action: string | null) {
   return map[action] ?? null;
 }
 
-// ─── Page ────────────────────────────────────────────────────────────────────
+export default function HomePage() {
+  const [wallet, setWallet] = useState<Wallet | null>(null);
+  const [upcoming, setUpcoming] = useState<UpcomingMatch[]>([]);
+  const [recentBets, setRecentBets] = useState<Bet[]>([]);
+  const [loading, setLoading] = useState(true);
 
-export default async function HomePage() {
-  const [wallet, upcoming, recentBets] = await Promise.all([
-    getWallet(),
-    getUpcomingMatches(),
-    getRecentBets(5),
-  ]);
+  useEffect(() => {
+    Promise.all([getWallet(), getUpcomingMatches(), getRecentBets(5)])
+      .then(([w, u, b]) => {
+        setWallet(w);
+        setUpcoming(u);
+        setRecentBets(b);
+      })
+      .finally(() => setLoading(false));
+  }, []);
 
-  const balance = wallet?.balance ?? 10;
+  const balance = wallet?.balance ?? 100;
   const staked = wallet?.total_staked ?? 0;
   const returned = wallet?.total_returned ?? 0;
   const pnlEur = returned - staked;
@@ -68,14 +76,12 @@ export default async function HomePage() {
     <div className="max-w-7xl mx-auto px-6 py-12 space-y-16">
       {/* ─── Hero ─────────────────────────────────────────────────────────── */}
       <section className="space-y-10">
-        {/* Eyebrow */}
         <div className="flex items-center gap-3">
           <span className="section-label">Since {inception}</span>
           <span className="w-1 h-1 rounded-full bg-border inline-block" />
           <span className="section-label">Premier League</span>
         </div>
 
-        {/* Big number */}
         <div className="space-y-4 animate-fade-up">
           <p className="text-sm font-medium text-muted">Total P&amp;L</p>
           <div className="flex items-baseline gap-4">
@@ -84,47 +90,47 @@ export default async function HomePage() {
                 isProfit ? "text-profit" : "text-loss"
               }`}
             >
-              {isProfit ? "+" : ""}€{fmt(pnlEur)}
+              {loading ? "—" : `${isProfit ? "+" : ""}€${fmt(pnlEur)}`}
             </h1>
-            <span
-              className={`text-2xl font-semibold tabular ${
-                isProfit ? "text-profit" : "text-loss"
-              }`}
-            >
-              {isProfit ? "↑" : "↓"} {fmt(Math.abs(roi), 1)}% ROI
-            </span>
+            {!loading && (
+              <span
+                className={`text-2xl font-semibold tabular ${isProfit ? "text-profit" : "text-loss"}`}
+              >
+                {isProfit ? "↑" : "↓"} {fmt(Math.abs(roi), 1)}% ROI
+              </span>
+            )}
           </div>
           <p className="text-muted text-sm">
             Starting balance{" "}
-            <span className="tabular font-medium text-primary">€10.00</span>
+            <span className="tabular font-medium text-primary">€100.00</span>
             &nbsp;·&nbsp; Current balance{" "}
             <span className="tabular font-medium text-primary">
-              €{fmt(balance)}
+              {loading ? "—" : `€${fmt(balance)}`}
             </span>
           </p>
         </div>
 
-        {/* Stat row */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 animate-fade-up animate-delay-100 opacity-0-init">
+        {/* Stat cards */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
             {
               label: "Total staked",
-              value: `€${fmt(staked)}`,
+              value: loading ? "—" : `€${fmt(staked)}`,
               sub: "all time",
             },
             {
               label: "Total returned",
-              value: `€${fmt(returned)}`,
+              value: loading ? "—" : `€${fmt(returned)}`,
               sub: "from wins",
             },
             {
               label: "Recent record",
-              value: `${wonBets}W / ${lostBets}L`,
+              value: loading ? "—" : `${wonBets}W / ${lostBets}L`,
               sub: "last 5 settled",
             },
             {
               label: "Next matches",
-              value: `${upcoming.length}`,
+              value: loading ? "—" : `${upcoming.length}`,
               sub: "scheduled",
             },
           ].map(({ label, value, sub }) => (
@@ -138,8 +144,7 @@ export default async function HomePage() {
           ))}
         </div>
 
-        {/* CTA */}
-        <div className="flex gap-3 animate-fade-up animate-delay-200 opacity-0-init">
+        <div className="flex gap-3">
           <Link href="/dashboard" className="btn-primary">
             View Dashboard
             <svg
@@ -163,7 +168,7 @@ export default async function HomePage() {
       </section>
 
       {/* ─── Upcoming Matches ─────────────────────────────────────────────── */}
-      <section className="space-y-5 animate-fade-up animate-delay-300 opacity-0-init">
+      <section className="space-y-5">
         <div className="flex items-center justify-between">
           <h2 className="text-display-sm font-display text-primary">
             Upcoming fixtures
@@ -171,7 +176,13 @@ export default async function HomePage() {
           <span className="section-label">{upcoming.length} scheduled</span>
         </div>
 
-        {upcoming.length === 0 ? (
+        {loading ? (
+          <div className="grid gap-3">
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="card px-5 py-4 h-20 skeleton" />
+            ))}
+          </div>
+        ) : upcoming.length === 0 ? (
           <div className="card px-6 py-12 text-center text-muted text-sm">
             No upcoming fixtures found. Check back closer to the next matchday.
           </div>
@@ -190,7 +201,7 @@ export default async function HomePage() {
                   key={match.match_id}
                   className="card px-5 py-4 flex flex-col sm:flex-row sm:items-center gap-4 hover:shadow-card-md transition-shadow duration-200"
                 >
-                  {/* Teams + kickoff */}
+                  {/* Teams */}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-0.5">
                       <ClubBadge
@@ -217,7 +228,7 @@ export default async function HomePage() {
                     </p>
                   </div>
 
-                  {/* Probability bars — Win / Draw / Loss from model */}
+                  {/* Probability bars */}
                   <div className="flex-1 space-y-2 min-w-[180px]">
                     {[
                       {
@@ -246,7 +257,6 @@ export default async function HomePage() {
                         key={label + sublabel}
                         className="flex items-center gap-2"
                       >
-                        {/* Label */}
                         <div className="w-20 flex-shrink-0">
                           <span className="text-[10px] font-mono font-bold text-muted">
                             {label}
@@ -256,14 +266,12 @@ export default async function HomePage() {
                             {sublabel}
                           </span>
                         </div>
-                        {/* Bar */}
                         <div className="flex-1 h-1.5 bg-subtle rounded-full overflow-hidden">
                           <div
                             className={`h-full rounded-full ${color} transition-all duration-700`}
                             style={{ width: `${(prob * 100).toFixed(1)}%` }}
                           />
                         </div>
-                        {/* Percentage */}
                         <span
                           className={`text-xs font-mono font-bold tabular w-10 text-right ${textColor}`}
                         >
@@ -309,7 +317,7 @@ export default async function HomePage() {
 
       {/* ─── Recent settled bets ──────────────────────────────────────────── */}
       {recentBets.length > 0 && (
-        <section className="space-y-5 animate-fade-up animate-delay-400 opacity-0-init">
+        <section className="space-y-5">
           <div className="flex items-center justify-between">
             <h2 className="text-display-sm font-display text-primary">
               Recent bets
@@ -362,7 +370,7 @@ export default async function HomePage() {
                             : "—"}
                         </span>
                       </td>
-                      {/* Match — home right | vs | away left */}
+                      {/* Match */}
                       <td className="px-5 py-3.5">
                         <div className="flex items-center gap-2 w-52">
                           <div className="flex items-center justify-end gap-1.5 flex-1 min-w-0">

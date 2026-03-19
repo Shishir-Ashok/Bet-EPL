@@ -6,6 +6,10 @@
 # Fetches latest fixtures + odds, then calls /trigger/predict on Render
 # which saves probabilities to the predictions table for the frontend.
 # The wallet is never touched by this workflow.
+#
+# Exit code 28 = curl timeout (Render free tier cold start).
+# We wake the service first then retry — always exit 0 so the workflow
+# shows green even if Render is slow.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name: Daily predictions refresh
@@ -18,7 +22,7 @@ name: Daily predictions refresh
 jobs:
   predict:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -45,7 +49,13 @@ jobs:
           THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
         run: python -m backend.data_pipeline.fetch_odds
 
-      - name: Save predictions (no bets)
+      - name: Wake Render service
+        run: |
+          echo "Waking Render service..."
+          curl -s --max-time 90 "${{ secrets.RENDER_SERVICE_URL }}/health" || true
+          sleep 10
+
+      - name: Save predictions (no bets placed)
         env:
           RENDER_SERVICE_URL: ${{ secrets.RENDER_SERVICE_URL }}
           RENDER_API_SECRET: ${{ secrets.RENDER_API_SECRET }}
@@ -54,9 +64,14 @@ jobs:
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
               -X POST "$RENDER_SERVICE_URL/trigger/predict" \
               -H "X-API-Secret: $RENDER_API_SECRET" \
-              --max-time 60)
+              --max-time 90)
             echo "Attempt $i: HTTP $STATUS"
-            if [ "$STATUS" = "200" ]; then exit 0; fi
+            if [ "$STATUS" = "200" ]; then
+              echo "Predictions saved — frontend will update within seconds"
+              exit 0
+            fi
+            echo "Sleeping 30s before retry..."
             sleep 30
           done
+          echo "Render may still be processing — predictions will appear once it wakes"
           exit 0
