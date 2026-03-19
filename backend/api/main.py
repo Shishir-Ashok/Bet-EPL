@@ -127,25 +127,37 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Detailed health check — checks DB connectivity."""
+    """
+    Detailed health check — always returns 200 so Render does not
+    restart the service due to DB misconfiguration. DB status is
+    reported in the response body for easy debugging.
+    """
+    db_status = "unknown"
+    balance   = None
+    db_error  = None
+
     try:
         from backend.db import supabase
-        result = supabase.table("wallet").select("balance").eq("id", 1).execute()
-        balance = float(result.data[0]["balance"]) if result.data else None
-        return {
-            "status":   "ok",
-            "db":       "connected",
-            "balance":  balance,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        result    = supabase.table("wallet").select("balance").eq("id", 1).execute()
+        balance   = float(result.data[0]["balance"]) if result.data else None
+        db_status = "connected"
     except Exception as e:
-        log.error(f"Health check failed: {e}")
-        return {
-            "status":    "degraded",
-            "db":        "error",
-            "error":     str(e),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+        db_error  = str(e)
+        db_status = "error"
+        log.error(f"Health check DB error: {e}")
+
+    return {
+        "status":   "ok",
+        "db":       db_status,
+        "balance":  balance,
+        "db_error": db_error,
+        "env_vars": {
+            "SUPABASE_URL":        "set" if os.environ.get("SUPABASE_URL") else "MISSING",
+            "SUPABASE_SECRET_KEY": "set" if os.environ.get("SUPABASE_SECRET_KEY") else "MISSING",
+            "RENDER_API_SECRET":   "set" if os.environ.get("RENDER_API_SECRET") else "MISSING",
+        },
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ─── Trigger: predict + place bets ───────────────────────────────────────────
