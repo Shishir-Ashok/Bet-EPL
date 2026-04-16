@@ -77,6 +77,12 @@ jobs:
           SEASON=${{ inputs.season || '2024-25' }}
           python -m backend.data_pipeline.update_elo --season $SEASON
 
+      - name: Wake Render service
+        run: |
+          echo "Waking Render service..."
+          curl -s --max-time 90 "${{ secrets.RENDER_SERVICE_URL }}/health" || true
+          sleep 10
+
       - name: Settle open bets + trigger RL reward signal
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

@@ -32,9 +32,9 @@ on:
   workflow_dispatch:
     inputs:
       force_promote:
-        description: 'Promote new model even if validation is worse'
+        description: "Promote new model even if validation is worse"
         required: false
-        default: 'false'
+        default: "false"
         type: boolean
 
 jobs:
@@ -43,10 +43,16 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      - name: Wake Render service
+        run: |
+          echo "Waking Render service..."
+          curl -s --max-time 90 "${{ secrets.RENDER_SERVICE_URL }}/health" || true
+          sleep 10
+
       - name: Trigger retraining on Render
         env:
           RENDER_SERVICE_URL: ${{ secrets.RENDER_SERVICE_URL }}
-          RENDER_API_SECRET:  ${{ secrets.RENDER_API_SECRET }}
+          RENDER_API_SECRET: ${{ secrets.RENDER_API_SECRET }}
         run: |
           FORCE=${{ inputs.force_promote || 'false' }}
           echo "Triggering weekly retrain (force_promote=$FORCE)..."
