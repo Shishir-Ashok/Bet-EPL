@@ -35,16 +35,14 @@ from backend.db import supabase
 API_KEY     = os.environ.get("THE_ODDS_API_KEY")
 BASE_URL    = "https://api.the-odds-api.com/v4"
 SPORT       = "soccer_epl"
-REGIONS     = "eu"         # European decimal odds
-MARKETS     = "h2h"        # Head-to-head = 1X2 (home/draw/away)
+REGIONS     = "eu"
+MARKETS     = "h2h"
 ODDS_FORMAT = "decimal"
 
-# Bookmakers we care about — prioritise well-known ones for realistic odds
-PREFERRED_BOOKMAKERS = {
-    "bet365", "betfair", "williamhill", "paddypower",
-    "unibet", "skybet", "ladbrokes", "coral"
-}
-
+# Bookmaker priority: Pinnacle is the sharpest market and our primary source.
+# Marathonbet is the fallback if Pinnacle doesn't return odds for a fixture.
+PRIMARY_BOOKMAKER  = "pinnacle"
+FALLBACK_BOOKMAKER = "marathonbet"
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -167,82 +165,96 @@ def fetch_upcoming_odds() -> list[dict]:
 
 def upsert_odds(events: list[dict]) -> tuple[int, int]:
     """
-    For each event, find the matching DB match and insert odds rows
-    for every bookmaker.
+    For each event, find the matching DB match and upsert a single odds row
+    using Pinnacle as the primary source, falling back to Marathonbet.
 
-    Returns (events_matched, odds_rows_inserted).
+    One row per match — upsert on match_id so re-runs are safe.
+    Returns (events_matched, odds_rows_upserted).
     """
-    events_matched   = 0
-    odds_rows_total  = 0
+    events_matched  = 0
+    odds_upserted   = 0
 
     for event in events:
         match_id = match_event_to_db_match(event)
         if not match_id:
-            print(f"  ⚠ No DB match found for: {event.get('home_team')} vs {event.get('away_team')} ({event.get('commence_time')})")
+            print(f"  ⚠ No DB match for: {event.get('home_team')} vs {event.get('away_team')} ({event.get('commence_time')})")
             continue
 
         events_matched += 1
-        odds_rows = []
 
-        for bookmaker in event.get("bookmakers", []):
-            bk_name = bookmaker.get("key", "unknown")
-            h2h = extract_h2h_odds(bookmaker)
-            if not h2h:
-                continue
-            home_odds, draw_odds, away_odds = h2h
+        # Index bookmakers by key for O(1) lookup
+        bookmakers = {bk["key"]: bk for bk in event.get("bookmakers", [])}
 
-            odds_rows.append({
-                "match_id":   match_id,
-                "bookmaker":  bk_name,
-                "home_odds":  home_odds,
-                "draw_odds":  draw_odds,
-                "away_odds":  away_odds,
-            })
+        selected_odds = None
+        selected_name = None
 
-        if odds_rows:
-            supabase.table("odds").insert(odds_rows).execute()
-            odds_rows_total += len(odds_rows)
-            print(f"  ✓ {event['home_team']} vs {event['away_team']}: {len(odds_rows)} bookmakers")
+        for bk_key in (PRIMARY_BOOKMAKER, FALLBACK_BOOKMAKER):
+            bk = bookmakers.get(bk_key)
+            if bk:
+                h2h = extract_h2h_odds(bk)
+                if h2h:
+                    selected_odds = h2h
+                    selected_name = bk_key
+                    break
 
-    return events_matched, odds_rows_total
+        if not selected_odds:
+            print(f"  ⚠ Neither Pinnacle nor Marathonbet available for: "
+                  f"{event.get('home_team')} vs {event.get('away_team')}")
+            continue
+
+        home_odds, draw_odds, away_odds = selected_odds
+
+        supabase.table("odds").upsert(
+            {
+                "match_id":  match_id,
+                "bookmaker": selected_name,
+                "home_odds": home_odds,
+                "draw_odds": draw_odds,
+                "away_odds": away_odds,
+            },
+            on_conflict="match_id"
+        ).execute()
+
+        odds_upserted += 1
+        print(f"  ✓ {event['home_team']} vs {event['away_team']}: "
+              f"{selected_name} — {home_odds} / {draw_odds} / {away_odds}")
+
+    return events_matched, odds_upserted
 
 
 def get_best_odds(match_id: int) -> dict | None:
     """
-    Utility: returns the best available decimal odds across all bookmakers
-    for a given match. Used by the bet engine to maximise expected value.
-
-    Best = highest odds for the predicted outcome (most favourable payout).
+    Returns the stored odds for a match.
+    One row per match (Pinnacle, or Marathonbet fallback).
     """
     result = (
         supabase.table("odds")
-        .select("bookmaker, home_odds, draw_odds, away_odds, fetched_at")
+        .select("bookmaker, home_odds, draw_odds, away_odds")
         .eq("match_id", match_id)
-        .order("fetched_at", desc=True)
-        .limit(20)  # last 20 snapshots across bookmakers
+        .limit(1)
         .execute()
     )
 
     if not result.data:
         return None
 
-    # Find the max odds for each outcome
-    best = {
-        "home": max(r["home_odds"] for r in result.data),
-        "draw": max(r["draw_odds"] for r in result.data),
-        "away": max(r["away_odds"] for r in result.data),
+    row = result.data[0]
+    return {
+        "home":       row["home_odds"],
+        "draw":       row["draw_odds"],
+        "away":       row["away_odds"],
+        "bookmaker":  row["bookmaker"],
     }
-    return best
 
 
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     print("=" * 55)
-    print("  Fetching pre-match PL odds")
+    print("  Fetching pre-match PL odds (Pinnacle / Marathonbet)")
     print("=" * 55)
 
-    events             = fetch_upcoming_odds()
-    matched, inserted  = upsert_odds(events)
+    events = fetch_upcoming_odds()
+    matched, upserted = upsert_odds(events)
 
-    print(f"\n✓ Done. {matched}/{len(events)} events matched, {inserted} odds rows inserted.")
+    print(f"\n✓ Done. {matched}/{len(events)} events matched, {upserted} odds rows upserted.")

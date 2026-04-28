@@ -38,54 +38,53 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from backend.db import supabase
-
-# ─── Constants ────────────────────────────────────────────────────────────────
+from backend.data_pipeline.season_utils import (
+    get_current_season, get_historical_seasons, get_season_for_label
+)
 
 FDCO_BASE             = "https://www.football-data.co.uk/mmz4281"
 XG_PER_SHOT_ON_TARGET = 0.30
 
-FDCO_SEASONS = {
-    "2020-21": "2021",
-    "2021-22": "2122",
-    "2022-23": "2223",
-    "2023-24": "2324",
-    "2024-25": "2425",
-}
-
-HISTORICAL_SEASONS = ["2020-21", "2021-22", "2022-23", "2023-24"]
+# FDCO_SEASONS dict removed — codes are now derived dynamically.
+# Pattern: "2025-26" → start[2:] + end[2:] = "25" + "26" = "2526"
+# See season_utils._season_from_start() which computes fdco_code.
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; PLBettingBot/1.0; research)"
 }
 
+# FDCO team name → our DB short_name mapping.
+# Covers all clubs that have appeared in the PL since 2020.
 FDCO_TEAM_MAP = {
     "Arsenal":           "Arsenal",
     "Aston Villa":       "Aston Villa",
     "Bournemouth":       "Bournemouth",
     "Brentford":         "Brentford",
     "Brighton":          "Brighton",
+    "Burnley":           "Burnley",
     "Chelsea":           "Chelsea",
     "Crystal Palace":    "Crystal Palace",
     "Everton":           "Everton",
     "Fulham":            "Fulham",
     "Ipswich":           "Ipswich",
+    "Leeds":             "Leeds",
     "Leicester":         "Leicester",
     "Liverpool":         "Liverpool",
+    "Luton":             "Luton",
     "Man City":          "Man City",
     "Man United":        "Man United",
     "Newcastle":         "Newcastle",
     "Nott'm Forest":     "Nott'm Forest",
     "Nottingham Forest": "Nott'm Forest",
+    "Norwich":           "Norwich",
+    "Sheffield United":  "Sheffield Utd",
     "Southampton":       "Southampton",
+    "Sunderland":        "Sunderland",
     "Tottenham":         "Spurs",
+    "Watford":           "Watford",
+    "West Brom":         "West Brom",
     "West Ham":          "West Ham",
     "Wolves":            "Wolves",
-    "Leeds":             "Leeds",
-    "Norwich":           "Norwich",
-    "Burnley":           "Burnley",
-    "Watford":           "Watford",
-    "Sheffield United":  "Sheffield Utd",
-    "West Brom":         "West Brom",
 }
 
 
@@ -94,15 +93,13 @@ FDCO_TEAM_MAP = {
 def fetch_stats_from_csv(season_label: str) -> dict:
     """
     Downloads the FDCO CSV and extracts per-match stats.
-
     Returns a lookup dict keyed by (home_short, away_short, date_str).
     """
-    season_code = FDCO_SEASONS.get(season_label)
-    if not season_code:
-        print(f"  ✗ No season code for {season_label}")
-        return {}
+    # Derive FDCO code dynamically — no hardcoded dict needed.
+    season = get_season_for_label(season_label)
+    fdco_code = season["fdco_code"]
 
-    url = f"{FDCO_BASE}/{season_code}/E0.csv"
+    url = f"{FDCO_BASE}/{fdco_code}/E0.csv"
     print(f"  Downloading: {url}")
 
     try:
@@ -243,7 +240,15 @@ def match_and_write(lookup: dict, matches: list[dict]) -> tuple[int, int]:
 
 # ─── Entry points ─────────────────────────────────────────────────────────────
 
-def run(season: str):
+def run(season: str | None = None):
+    """
+    Process stats for a single season. Defaults to current season
+    if no label passed.
+    """
+    if season is None:
+        season = get_current_season()["label"]
+        print(f"  No season specified — auto-detected: {season}")
+
     print("=" * 55)
     print(f"  Match stats — season: {season}")
     print("=" * 55)
@@ -252,10 +257,10 @@ def run(season: str):
     matches = get_finished_matches_without_stats(season)
 
     if not lookup:
-        print("  No data — exiting.")
+        print("  No CSV data available — exiting.")
         return
 
-    print(f"\n  Matching to {len(matches)} DB matches...")
+    print(f"\n  Matching to {len(matches)} DB matches without stats...")
     updated, skipped = match_and_write(lookup, matches)
     print(f"\n✓ Done. Updated: {updated}, Skipped: {skipped}")
 
@@ -265,15 +270,18 @@ def run_all_historical():
     print("  Match stats — all historical seasons")
     print("=" * 55)
 
+    seasons = get_historical_seasons(from_year=2020)
+    print(f"  Seasons: {[s['label'] for s in seasons]}\n")
+
     total_updated = total_skipped = 0
 
-    for season in HISTORICAL_SEASONS:
-        print(f"\n── {season} ──────────────────────────────────")
-        lookup  = fetch_stats_from_csv(season)
-        matches = get_finished_matches_without_stats(season)
+    for season in seasons:
+        print(f"\n── {season['label']} ──────────────────────────────────")
+        lookup  = fetch_stats_from_csv(season["label"])
+        matches = get_finished_matches_without_stats(season["label"])
 
         if not lookup:
-            print(f"  Skipping — no data")
+            print(f"  Skipping — CSV not available yet")
             continue
 
         updated, skipped  = match_and_write(lookup, matches)
@@ -291,7 +299,11 @@ def run_all_historical():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract match stats from FDCO CSVs")
     group  = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--season",         help="Single season e.g. 2023-24")
+    group.add_argument(
+        "--season",
+        default=None,
+        help="Single season label e.g. 2023-24 (omit to auto-detect current)"
+    )
     group.add_argument("--all-historical", action="store_true")
     args = parser.parse_args()
 

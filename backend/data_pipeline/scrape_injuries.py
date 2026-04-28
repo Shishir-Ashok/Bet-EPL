@@ -47,29 +47,40 @@ HEADERS = {
 
 SCRAPE_DELAY = 3  # seconds between team pages
 
-# BBC Sport team slug → our DB tla mapping
-# These are the URL slugs BBC uses in their team pages
+# BBC Sport team slug → DB TLA mapping.
+# Covers all clubs in the PL since 2020-21, including promoted/relegated.
+# Add new clubs here whenever a team outside this list is promoted.
 BBC_TEAM_SLUGS = {
+    # 2025-26 current season
     "ARS": "arsenal",
     "AVL": "aston-villa",
     "BOU": "bournemouth",
     "BRE": "brentford",
     "BHA": "brighton-and-hove-albion",
+    "BUR": "burnley",          # promoted 2025-26
     "CHE": "chelsea",
     "CRY": "crystal-palace",
     "EVE": "everton",
     "FUL": "fulham",
-    "IPS": "ipswich-town",
-    "LEI": "leicester-city",
+    "LEE": "leeds-united",     # promoted 2025-26
     "LIV": "liverpool",
     "MCI": "manchester-city",
     "MUN": "manchester-united",
     "NEW": "newcastle-united",
     "NFO": "nottingham-forest",
-    "SOU": "southampton",
+    "SUN": "sunderland",       # promoted 2025-26
     "TOT": "tottenham-hotspur",
     "WHU": "west-ham-united",
     "WOL": "wolverhampton-wanderers",
+    # Recently relegated — keep so historical scrapes still work
+    "IPS": "ipswich-town",
+    "LEI": "leicester-city",
+    "SOU": "southampton",
+    "LUT": "luton-town",
+    "SHU": "sheffield-united",
+    "NOR": "norwich-city",
+    "WAT": "watford",
+    "WBA": "west-bromwich-albion",
 }
 
 BBC_BASE = "https://www.bbc.com/sport/football"

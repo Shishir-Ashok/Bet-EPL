@@ -66,16 +66,22 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: |
-          SEASON=${{ inputs.season || '2024-25' }}
-          python -m backend.data_pipeline.scrape_stats --season $SEASON
+          if [ -n "${{ inputs.season }}" ]; then
+            python -m backend.data_pipeline.scrape_stats --season "${{ inputs.season }}"
+          else
+            python -m backend.data_pipeline.scrape_stats
+          fi
 
       - name: Update ELO ratings
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: |
-          SEASON=${{ inputs.season || '2024-25' }}
-          python -m backend.data_pipeline.update_elo --season $SEASON
+          if [ -n "${{ inputs.season }}" ]; then
+            python -m backend.data_pipeline.update_elo --season "${{ inputs.season }}"
+          else
+            python -m backend.data_pipeline.update_elo
+          fi
 
       - name: Wake Render service
         run: |

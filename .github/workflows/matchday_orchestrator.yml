@@ -1,0 +1,156 @@
+# .github/workflows/matchday_orchestrator.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# MATCHDAY ORCHESTRATOR
+# Runs every hour. Checks Supabase for fixtures starting within the next
+# 95 minutes. If none found, exits immediately (<20s). If matches are
+# upcoming, runs the full pre-match pipeline: fixtures → odds → injuries
+# → predictions → bets.
+#
+# This replaces fetch_prematch.yml, daily_predictions.yml, and place_bets.yml.
+#
+# Why 95 minutes?
+#   Hourly cron at :00 — a 14:00 kickoff is caught by the 13:00 run
+#   (13:00 + 95m = 14:35), but NOT re-triggered by the 14:00 run
+#   (14:00 + 5m lower bound means a 14:00 kickoff is already "now").
+#   The 5-minute lower bound prevents re-running for a match
+#   that is already kicking off this minute.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Matchday orchestrator
+
+on:
+  schedule:
+    - cron: "0 * * * *" # every hour, on the hour
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: "Skip fixture check and run the full pipeline anyway"
+        required: false
+        default: "false"
+        type: boolean
+
+jobs:
+  orchestrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for upcoming fixtures
+        id: fixture_check
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          FORCE_RUN: ${{ inputs.force_run || 'false' }}
+        run: |
+          if [ "$FORCE_RUN" = "true" ]; then
+            echo "Force run requested — skipping fixture check."
+            echo "has_fixtures=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Window: kickoffs between now+5min and now+95min
+          WINDOW_START=$(date -u -d '+5 minutes'  +%Y-%m-%dT%H:%M:%SZ)
+          WINDOW_END=$(date -u   -d '+95 minutes' +%Y-%m-%dT%H:%M:%SZ)
+
+          echo "Checking for fixtures between ${WINDOW_START} and ${WINDOW_END}..."
+
+          MATCH_COUNT=$(curl -sf \
+            -H "apikey: ${SUPABASE_SECRET_KEY}" \
+            -H "Authorization: Bearer ${SUPABASE_SECRET_KEY}" \
+            "${SUPABASE_URL}/rest/v1/matches?select=id,kickoff_time&status=eq.SCHEDULED&kickoff_time=gte.${WINDOW_START}&kickoff_time=lte.${WINDOW_END}" \
+            | jq 'length')
+
+          echo "Fixtures found in window: ${MATCH_COUNT}"
+
+          if [ "${MATCH_COUNT}" = "0" ] || [ -z "${MATCH_COUNT}" ]; then
+            echo "No upcoming fixtures. Exiting cleanly."
+            echo "has_fixtures=false" >> $GITHUB_OUTPUT
+          else
+            echo "has_fixtures=true" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: actions/setup-python@v5
+        if: steps.fixture_check.outputs.has_fixtures == 'true'
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        if: steps.fixture_check.outputs.has_fixtures == 'true'
+        run: pip install -r backend/requirements.txt
+
+      - name: Fetch current season fixtures
+        if: steps.fixture_check.outputs.has_fixtures == 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          FOOTBALL_DATA_API_KEY: ${{ secrets.FOOTBALL_DATA_API_KEY }}
+        run: python -m backend.data_pipeline.fetch_fixtures --current
+
+      - name: Fetch pre-match odds (Pinnacle / Marathonbet)
+        if: steps.fixture_check.outputs.has_fixtures == 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
+        run: python -m backend.data_pipeline.fetch_odds
+
+      - name: Scrape injury news
+        if: steps.fixture_check.outputs.has_fixtures == 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+        run: python -m backend.data_pipeline.scrape_injuries
+
+      - name: Wake Render service
+        if: steps.fixture_check.outputs.has_fixtures == 'true'
+        run: |
+          echo "Waking Render service..."
+          curl -s --max-time 90 "${{ secrets.RENDER_SERVICE_URL }}/health" || true
+          sleep 10
+
+      - name: Generate predictions
+        if: steps.fixture_check.outputs.has_fixtures == 'true'
+        env:
+          RENDER_SERVICE_URL: ${{ secrets.RENDER_SERVICE_URL }}
+          RENDER_API_SECRET: ${{ secrets.RENDER_API_SECRET }}
+        run: |
+          for i in 1 2 3; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X POST "$RENDER_SERVICE_URL/trigger/predict" \
+              -H "X-API-Secret: $RENDER_API_SECRET" \
+              --max-time 90)
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "Predictions saved — frontend will update within seconds"
+              exit 0
+            fi
+            echo "Sleeping 30s before retry..."
+            sleep 30
+          done
+          echo "Render may still be processing — predictions will appear once it wakes"
+          exit 0
+
+      - name: Place Bets
+        if: steps.fixture_check.outputs.has_fixtures == 'true'
+        env:
+          RENDER_SERVICE_URL: ${{ secrets.RENDER_SERVICE_URL }}
+          RENDER_API_SECRET: ${{ secrets.RENDER_API_SECRET }}
+        run: |
+          for i in 1 2 3; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X POST "$RENDER_SERVICE_URL/trigger/bet" \
+              -H "X-API-Secret: $RENDER_API_SECRET" \
+              --max-time 90)
+            echo "Attempt $i: HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "Bets placed successfully"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "Warning: Render did not respond"
+          exit 0

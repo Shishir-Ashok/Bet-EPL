@@ -36,6 +36,7 @@ import argparse
 from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+from backend.data_pipeline.season_utils import get_current_season, get_all_seasons
 from backend.db import supabase
 
 # ─── ELO Parameters ───────────────────────────────────────────────────────────
@@ -168,13 +169,13 @@ def run(season: str | None = None, all_seasons: bool = False):
     if all_seasons:
         print("  Mode: full recalculation (all seasons)")
         print("  ⚠ This clears all existing ELO ratings first!")
-
-        # Nuclear option — wipe and recalculate from scratch
-        # Use with care: only needed if K or HFA parameters change
         supabase.table("elo_ratings").delete().neq("id", 0).execute()
         matches = get_matches_without_elo(all_seasons=True)
     else:
-        season = season or "2024-25"
+        # Auto-detect current season if not explicitly passed
+        if season is None:
+            season = get_current_season()["label"]
+            print(f"  No season specified — auto-detected: {season}")
         print(f"  Mode: incremental ({season})")
         matches = get_matches_without_elo(season=season)
 
@@ -191,16 +192,13 @@ def run(season: str | None = None, all_seasons: bool = False):
         result   = match["result"]
         match_id = match["id"]
 
-        # Get current ratings BEFORE this match
         home_elo_before = get_current_elo(home_id)
         away_elo_before = get_current_elo(away_id)
 
-        # Calculate new ratings
         home_elo_after, away_elo_after = update_ratings(
             home_elo_before, away_elo_before, result
         )
 
-        # Persist
         save_elo(home_id, match_id, home_elo_after)
         save_elo(away_id, match_id, away_elo_after)
 
@@ -209,26 +207,22 @@ def run(season: str | None = None, all_seasons: bool = False):
 
         print(
             f"  Match {match_id} ({result}): "
-            f"Home {home_elo_before:.0f} → {home_elo_after:.0f} "
+            f"Home {home_elo_before:.0f}→{home_elo_after:.0f} "
             f"({'+'if home_delta>=0 else ''}{home_delta:.1f})  |  "
-            f"Away {away_elo_before:.0f} → {away_elo_after:.0f} "
+            f"Away {away_elo_before:.0f}→{away_elo_after:.0f} "
             f"({'+'if away_delta>=0 else ''}{away_delta:.1f})"
         )
         updated += 1
 
     print(f"\n✓ ELO ratings updated for {updated} matches.")
 
-    # Print current top 5 as a sanity check
     print("\n  Current top 5 ELO ratings:")
-    teams  = supabase.table("teams").select("id, short_name").execute().data
-    team_map = {t["id"]: t["short_name"] for t in teams}
-
+    teams = supabase.table("teams").select("id, short_name").execute().data
     top_elos = []
     for team in teams:
         elo = get_current_elo(team["id"])
-        if elo != STARTING_ELO:  # Only show teams with real history
+        if elo != STARTING_ELO:
             top_elos.append((team["short_name"], elo))
-
     top_elos.sort(key=lambda x: x[1], reverse=True)
     for rank, (name, elo) in enumerate(top_elos[:5], 1):
         print(f"  {rank}. {name}: {elo:.0f}")
@@ -237,8 +231,15 @@ def run(season: str | None = None, all_seasons: bool = False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Update ELO ratings after match results")
     group  = parser.add_mutually_exclusive_group()
-    group.add_argument("--season",      default="2024-25", help="Season to update (default: 2024-25)")
-    group.add_argument("--all-seasons", action="store_true", help="Recalculate all seasons from scratch")
+    group.add_argument(
+        "--season",
+        default=None,   # None = auto-detect current season
+        help="Season label e.g. 2024-25 (default: auto-detect current season)"
+    )
+    group.add_argument(
+        "--all-seasons",
+        action="store_true",
+        help="Wipe and recalculate all seasons from scratch"
+    )
     args = parser.parse_args()
-
     run(season=args.season, all_seasons=args.all_seasons)

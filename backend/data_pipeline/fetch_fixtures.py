@@ -32,22 +32,19 @@ from backend.db import supabase
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-API_KEY         = os.environ.get("FOOTBALL_DATA_API_KEY")
-BASE_URL        = "https://api.football-data.org/v4"
-PL_CODE         = "PL"
+API_KEY  = os.environ.get("FOOTBALL_DATA_API_KEY")
+BASE_URL = "https://api.football-data.org/v4"
+PL_CODE  = "PL"
 
-# Seasons to fetch for historical training data.
-# football-data.org season codes use the start year.
-HISTORICAL_SEASONS = ["2020", "2021", "2022", "2023"]
-CURRENT_SEASON     = "2025"   # 2025-26 season — update each August when the new season starts
+# Season values are derived at runtime — never hardcoded.
+# See backend/data_pipeline/season_utils.py
+from backend.data_pipeline.season_utils import get_current_season, get_historical_seasons
 
-# Status codes returned by the API
 FINISHED_STATUSES  = {"FINISHED"}
 SCHEDULED_STATUSES = {"SCHEDULED", "TIMED"}
 IN_PLAY_STATUSES   = {"IN_PLAY", "PAUSED", "SUSPENDED"}
 
-# How long to sleep between API calls (free tier = 10/min = 6s minimum)
-RATE_LIMIT_SLEEP = 7  # slightly above 6s to be safe
+RATE_LIMIT_SLEEP = 7
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -212,37 +209,40 @@ def upsert_matches(matches: list[dict], season_label: str) -> int:
 # ─── Entry point ──────────────────────────────────────────────────────────────
 
 def run_historical():
-    """Fetch 4 complete past seasons for training data."""
+    """
+    Fetch all completed seasons from 2020-21 up to (not including) current.
+    Safe to call at any point in the year — automatically includes the
+    most recently completed season (e.g. 2024-25 once we're in 2025-26).
+    """
     print("=" * 55)
     print("  Fetching historical PL fixtures (training data)")
     print("=" * 55)
 
+    seasons = get_historical_seasons(from_year=2020)
+    print(f"  Seasons to fetch: {[s['label'] for s in seasons]}\n")
+
     total = 0
-    for season in HISTORICAL_SEASONS:
-        matches = fetch_season(season)
-
-        # Season label stored in DB: "2020-21", "2021-22" etc.
-        label   = f"{season}-{str(int(season)+1)[2:]}"
-        count   = upsert_matches(matches, label)
+    for season in seasons:
+        matches = fetch_season(season["api_code"])
+        count   = upsert_matches(matches, season["label"])
         total  += count
-        print(f"  ✓ Season {label}: {count} matches upserted")
-
+        print(f"  ✓ Season {season['label']}: {count} matches upserted")
         time.sleep(RATE_LIMIT_SLEEP)
 
-    print(f"\n✓ Historical fetch complete. Total matches upserted: {total}")
+    print(f"\n✓ Historical fetch complete. Total: {total}")
 
 
 def run_current():
-    """Fetch the current season — used by the daily cron job."""
+    """Fetch the current season — used by the matchday orchestrator."""
     print("=" * 55)
     print("  Fetching current PL season fixtures")
     print("=" * 55)
 
-    season  = CURRENT_SEASON
-    label   = f"{season}-{str(int(season)+1)[2:]}"
-    matches = fetch_season(season)
-    count   = upsert_matches(matches, label)
-    print(f"\n✓ Current season ({label}): {count} matches upserted")
+    season  = get_current_season()
+    print(f"  Detected season: {season['label']}")
+    matches = fetch_season(season["api_code"])
+    count   = upsert_matches(matches, season["label"])
+    print(f"\n✓ Current season ({season['label']}): {count} matches upserted")
 
 
 if __name__ == "__main__":
