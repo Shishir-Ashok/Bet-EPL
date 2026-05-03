@@ -34,7 +34,7 @@ import logging
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -261,13 +261,8 @@ async def _run_settle():
 # ─── Trigger: retrain models ─────────────────────────────────────────────────
 
 @app.post("/trigger/retrain", dependencies=[Depends(verify_secret)])
-async def trigger_retrain(
-    body:             RetrainRequest = RetrainRequest(),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
-) -> TriggerResponse:
+async def trigger_retrain(request: Request, body: dict = Body(default={})):
     """
-    Triggered by weekly_retrain.yml every Monday at 06:00 UTC.
-
     Retrains both models:
       1. XGBoost — retrained on all historical + current season matches
       2. DQN — continues training from current weights using accumulated
@@ -280,13 +275,17 @@ async def trigger_retrain(
     The 202 response lets GitHub Actions know the job was accepted.
     """
     log.info(f"POST /trigger/retrain received (force_promote={body.force_promote})")
-    background_tasks.add_task(_run_retrain, body.epochs, body.force_promote)
-    return TriggerResponse(
-        status    = "accepted",
-        message   = "Retraining started in background",
-        timestamp = datetime.now(timezone.utc).isoformat(),
-        data      = {"epochs": body.epochs, "force_promote": body.force_promote},
-    )
+    incremental = body.get("incremental", False)
+    warm_start  = body.get("warm_start", False)
+    force       = body.get("force_promote", False)
+    # run in background thread so the HTTP response returns immediately
+    import threading
+    from backend.model.train import train_dqn_only
+    threading.Thread(
+        target=train_dqn_only,
+        kwargs={"incremental": incremental, "warm_start": warm_start}
+    ).start()
+    return {"status": "accepted", "incremental": incremental, "warm_start": warm_start}
 
 
 async def _run_retrain(epochs: int, force_promote: bool):

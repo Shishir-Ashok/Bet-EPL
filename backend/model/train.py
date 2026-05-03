@@ -31,6 +31,7 @@ Flags:
 
 import os
 import sys
+import json
 import argparse
 import random
 import numpy as np
@@ -46,23 +47,63 @@ from backend.model import replay_buffer
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-TRAIN_SEASONS = ["2020-21", "2021-22", "2022-23", "2023-24"]  # agent trains on these
-VAL_SEASON    = "2024-25"                                            # agent NEVER trains on this
+from backend.data_pipeline.season_utils import (
+    get_historical_seasons, get_current_season, get_all_seasons
+)
+
+def _get_train_val_seasons() -> tuple[list[str], str]:
+    """
+    Train on all completed seasons except the last (which is validation).
+    In April 2026 (2025-26 season in progress):
+      completed = [2020-21, 2021-22, 2022-23, 2023-24, 2024-25]
+      val   = 2024-25   (most recently completed — has full labels)
+      train = [2020-21 … 2023-24]
+
+    The CURRENT season (2025-26) is included in DQN incremental training
+    via the replay buffer (live settled bets), not in XGBoost batch training
+    since most of its matches may not yet be finished.
+    """
+    completed = get_historical_seasons(from_year=2020)
+    if len(completed) < 2:
+        raise ValueError("Need at least 2 completed seasons.")
+    val_season    = completed[-1]["label"]
+    train_seasons = [s["label"] for s in completed[:-1]]
+    return train_seasons, val_season
+
+
+TRAIN_SEASONS, VAL_SEASON = _get_train_val_seasons()
+CURRENT_SEASON = get_current_season()["label"]   # "2025-26" — used for incremental DQN
 
 DQN_EPOCHS         = 30
-STARTING_BALANCE   = 10.0
+STARTING_BALANCE   = 100.0
 MIN_BET            = 0.10
-
-# The agent only bets if Q(best_action) exceeds Q(PASS) by this amount.
-# This prevents the "bet on everything because Q > 0" collapse.
-# 0.5 means the agent must be half a EUR more confident in betting than passing.
-MIN_BET_CONFIDENCE = 0.5
-
-# Flat training stake — variable Kelly requires real bookmaker odds
-# which don't exist in historical data
-TRAINING_STAKE = 1.0
+from backend.engine.config import DQN_CONFIDENCE_GATE as MIN_BET_CONFIDENCE
+TRAINING_STAKE     = 1.0
 
 
+
+def get_last_retrain_episode() -> int:
+    """
+    Returns the episode_num of the most recent DQN training run,
+    used to fetch only NEW replay buffer entries since then.
+    Returns 0 if no prior training exists (full retrain needed).
+    """
+    result = (
+        supabase.table("model_versions")
+        .select("notes")
+        .eq("model_type", "dqn")
+        .eq("is_active", True)
+        .order("trained_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        return 0
+    try:
+        notes = json.loads(result.data[0]["notes"] or "{}")
+        return int(notes.get("last_episode_num", 0))
+    except Exception:
+        return 0
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def kelly_stake(prob: float, odds: float, balance: float, fraction: float = 0.25) -> float:
@@ -170,9 +211,9 @@ def precompute_states(matches: list, xgb_model, feature_cache: dict) -> dict:
             )
             try:
                 p = predict_probabilities(xgb_model, state)
-                state[7] = float(p["HOME"])
-                state[8] = float(p["DRAW"])
-                state[9] = float(p["AWAY"])
+                state[16] = float(p["HOME"])
+                state[17] = float(p["DRAW"])
+                state[18] = float(p["AWAY"])
             except Exception:
                 pass
             cache[m["id"]] = state
@@ -245,13 +286,13 @@ def run_epoch(
 
         odds = get_best_odds_for_action(match_id, action)
         if odds is None:
-            probs = [state[7], state[8], state[9]]
+            probs = [state[16], state[17], state[18]]
             p     = probs[action] if action < 3 else 1.0
             odds  = round(1.0 / max(p, 0.05), 2)
 
         stake = 0.0
         if action < 3:
-            p     = [state[7], state[8], state[9]][action]
+            p     = [state[16], state[17], state[18]][action]
             stake = kelly_stake(p, odds, balance)
             stake = max(stake, MIN_BET) if stake > 0 else 0.0
 
@@ -308,16 +349,31 @@ def run_epoch(
 
 # ─── Entry points ─────────────────────────────────────────────────────────────
 
-def train_xgboost_only(test: bool = False):
+def train_xgboost_only(test: bool = False, recent_only: bool = False):
+    """
+    Trains XGBoost on historical data.
+
+    recent_only=True: trains on the last 2 completed seasons only.
+    Useful for a faster mid-season retrain that emphasises recent patterns.
+    Full retrain (recent_only=False) is recommended at season start.
+    """
     print("\n" + "=" * 55)
     print("  XGBoost outcome predictor")
+    if recent_only:
+        completed = get_historical_seasons(from_year=2020)
+        # Take last 2 completed seasons as training data
+        seasons = [s["label"] for s in completed[-2:]]
+        print(f"  Mode: recent-only ({', '.join(seasons)})")
+    else:
+        seasons = TRAIN_SEASONS
+        print(f"  Mode: full ({', '.join(seasons)})")
     if test:
         print("  *** TEST MODE — 100 samples ***")
     print("=" * 55)
 
     version_tag    = f"xgb_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     model, metrics = train_xgboost(
-        seasons     = TRAIN_SEASONS,
+        seasons     = seasons,
         version_tag = version_tag,
         limit       = 100 if test else None,
     )
@@ -325,58 +381,103 @@ def train_xgboost_only(test: bool = False):
     return model
 
 
-def train_dqn_only(epochs: int = DQN_EPOCHS, test: bool = False, clear_buffer: bool = False):
+def train_dqn_only(
+    epochs:        int  = DQN_EPOCHS,
+    test:          bool = False,
+    clear_buffer:  bool = False,
+    incremental:   bool = False,   # NEW: only train on new replay buffer entries
+    warm_start:    bool = False,   # NEW: continue from existing DQN checkpoint
+):
+    """
+    Train the DQN agent.
+
+    incremental=True:
+      Only processes matches from the current season and new rl_episodes
+      entries added since the last retrain. The agent picks up from where
+      it left off — no need to re-run all historical data every Monday.
+      Use this for the weekly_retrain.yml workflow.
+
+    warm_start=True:
+      Loads the active DQN checkpoint before training instead of starting
+      fresh. Should always be True when incremental=True.
+
+    Full retrain (default):
+      Loads all historical seasons + full replay buffer. Use this when
+      STATE_DIM changes, parameters change, or at start of new season.
+    """
     print("\n" + "=" * 55)
     print("  DQN betting agent")
+    mode_label = "incremental" if incremental else "full retrain"
+    print(f"  Mode: {mode_label}{'  [warm start]' if warm_start else ''}")
     if test:
-        print("  *** TEST MODE — 100 matches, 3 epochs ***")
+        print("  *** TEST MODE ***")
     print("=" * 55)
 
     xgb_model = load_xgb()
     n_epochs  = 3 if test else epochs
 
-    # Load train and val matches separately
-    print(f"\n  Loading training matches ({', '.join(TRAIN_SEASONS)})...")
-    train_matches = load_matches(TRAIN_SEASONS, test=test)
+    if incremental:
+        # Only use current season's finished matches + val season
+        # Most of the learning comes from the replay buffer (live bets)
+        print(f"\n  Loading current season matches ({CURRENT_SEASON})...")
+        current_matches = load_matches([CURRENT_SEASON], test=test)
+        print(f"  Loading val season matches ({VAL_SEASON})...")
+        val_matches = load_matches([VAL_SEASON], test=test)
+        train_matches = current_matches
+        print(f"  Incremental train: {len(train_matches)} | Val: {len(val_matches)}")
+    else:
+        print(f"\n  Loading training matches ({', '.join(TRAIN_SEASONS)})...")
+        train_matches = load_matches(TRAIN_SEASONS, test=test)
+        print(f"  Loading val matches ({VAL_SEASON})...")
+        val_matches = load_matches([VAL_SEASON], test=test)
+        print(f"  Train: {len(train_matches)} | Val: {len(val_matches)}")
 
-    print(f"  Loading validation matches ({VAL_SEASON})...")
-    val_matches   = load_matches([VAL_SEASON], test=test)
-    print(f"  Train: {len(train_matches)}  |  Val: {len(val_matches)}")
-
-    all_matches = train_matches + val_matches
-
-    print("\n  Bulk fetching features (4 queries)...")
+    all_matches   = train_matches + val_matches
     feature_cache = bulk_fetch([m["id"] for m in all_matches])
-
-    print("\n  Pre-computing state vectors...")
-    train_cache = precompute_states(train_matches, xgb_model, feature_cache)
-    val_cache   = precompute_states(val_matches,   xgb_model, feature_cache)
+    train_cache   = precompute_states(train_matches, xgb_model, feature_cache)
+    val_cache     = precompute_states(val_matches, xgb_model, feature_cache)
 
     if clear_buffer:
         print("  Clearing replay buffer from DB...")
+        supabase.table("rl_episodes").delete().neq("id", 0).execute()
+        print("  ✓ Cleared")
+
+    n_loaded = replay_buffer.load_from_db()
+
+    if warm_start:
         try:
-            supabase.table("rl_episodes").delete().neq("id", 0).execute()
-            print("  ✓ Cleared")
-        except Exception as e:
-            print(f"  ⚠ Clear failed: {e}")
+            agent = DQNAgent.load_active()
+            print(f"  ✓ Warm start: loaded active DQN (ε={agent.epsilon:.3f})")
+            # Don't reset epsilon fully — decay slightly to signal new data phase
+            agent.epsilon = max(agent.epsilon, 0.20)
+        except FileNotFoundError:
+            print("  ⚠ No active DQN found — starting fresh")
+            agent = DQNAgent()
+    else:
+        agent = DQNAgent()
 
-    replay_buffer.load_from_db()
-
-    agent       = DQNAgent()
-    # Seconds-precision tag prevents duplicate key on same-minute reruns
-    version_tag = f"dqn_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    all_rewards = []
+    version_tag     = f"dqn_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    all_rewards     = []
     best_val_reward = float("-inf")
 
-    print(f"\n  Training {n_epochs} epochs")
-    print(f"  Train seasons: {TRAIN_SEASONS}")
-    print(f"  Val season:    {VAL_SEASON}  (never trained on)")
-    print(f"  Confidence gate: Q(bet) - Q(pass) >= {MIN_BET_CONFIDENCE}\n")
-    print(f"  {'Epoch':>5}  {'Train reward':>13}  {'Val reward':>11}  {'Val bets':>9}  {'Val win%':>9}  {'Balance':>9}  {'ε':>6}  {'Loss':>8}")
+    # Track highest episode_num in buffer so we can record it in model notes
+    last_ep = (
+        supabase.table("rl_episodes")
+        .select("episode_num")
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+        .data
+    )
+    last_episode_num = int(last_ep[0]["episode_num"] or 0) if last_ep else 0
+
+    print(f"\n  Replay buffer: {n_loaded} transitions")
+    print(f"  Training {n_epochs} epochs | Current season in training: {CURRENT_SEASON}")
+    print(f"  {'Epoch':>5}  {'Train reward':>13}  {'Val reward':>11}  "
+          f"{'Val bets':>9}  {'Val win%':>9}  {'Balance':>9}  {'ε':>6}  {'Loss':>8}")
     print("  " + "-" * 85)
 
     for epoch in range(1, n_epochs + 1):
-        # Shuffle training matches — prevents sequence memorisation
         shuffled_train = train_matches.copy()
         random.shuffle(shuffled_train)
 
@@ -385,7 +486,6 @@ def train_dqn_only(epochs: int = DQN_EPOCHS, test: bool = False, clear_buffer: b
 
         all_rewards.append(train_m["total_reward"])
 
-        # Track best validation performance
         if val_m["total_reward"] > best_val_reward:
             best_val_reward = val_m["total_reward"]
             agent.save(f"{version_tag}_best")
@@ -417,19 +517,22 @@ def train_dqn_only(epochs: int = DQN_EPOCHS, test: bool = False, clear_buffer: b
         version_tag = version_tag,
         save_path   = save_path,
         metrics     = {
-            "epochs":           int(n_epochs),
-            "final_train_reward": float(train_m["total_reward"]),
-            "best_val_reward":  float(best_val_reward),
-            "train_seasons":    TRAIN_SEASONS,
-            "val_season":       VAL_SEASON,
+            "epochs":               int(n_epochs),
+            "mode":                 mode_label,
+            "final_train_reward":   float(train_m["total_reward"]),
+            "best_val_reward":      float(best_val_reward),
+            "train_seasons":        [CURRENT_SEASON] if incremental else TRAIN_SEASONS,
+            "val_season":           VAL_SEASON,
+            "current_season":       CURRENT_SEASON,
+            "last_episode_num":     last_episode_num,   # for next incremental run
+            "replay_buffer_size":   n_loaded,
         },
         avg_reward = avg_reward,
     )
     replay_buffer.prune()
 
     print(f"\n✓ DQN done.")
-    print(f"  Best val reward: {best_val_reward:+.2f}  (saved as {version_tag}_best)")
-    print(f"  Final version:   {version_tag}")
+    print(f"  Best val reward: {best_val_reward:+.2f}")
     return agent
 
 
@@ -446,16 +549,32 @@ def train_full(epochs: int = DQN_EPOCHS, test: bool = False, clear_buffer: bool 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train the PL betting bot models")
-    parser.add_argument("--mode",         choices=["full", "xgboost", "dqn"], default="full")
-    parser.add_argument("--epochs",       type=int, default=DQN_EPOCHS)
-    parser.add_argument("--test",         action="store_true")
-    parser.add_argument("--clear-buffer", action="store_true",
-                        help="Wipe replay buffer before training")
+    parser.add_argument("--mode",          choices=["full", "xgboost", "dqn"], default="full")
+    parser.add_argument("--epochs",        type=int, default=DQN_EPOCHS)
+    parser.add_argument("--test",          action="store_true")
+    parser.add_argument("--clear-buffer",  action="store_true")
+    parser.add_argument("--incremental",   action="store_true",
+                        help="DQN: train on current season + replay buffer only (weekly mode)")
+    parser.add_argument("--warm-start",    action="store_true",
+                        help="DQN: continue from existing checkpoint instead of fresh init")
+    parser.add_argument("--recent-only",   action="store_true",
+                        help="XGBoost: train on last 2 seasons only (faster mid-season retrain)")
     args = parser.parse_args()
 
     if args.mode == "full":
-        train_full(epochs=args.epochs, test=args.test, clear_buffer=args.clear_buffer)
+        train_xgboost_only(test=args.test, recent_only=args.recent_only)
+        train_dqn_only(
+            epochs=args.epochs, test=args.test,
+            clear_buffer=args.clear_buffer,
+            incremental=args.incremental,
+            warm_start=args.warm_start,
+        )
     elif args.mode == "xgboost":
-        train_xgboost_only(test=args.test)
+        train_xgboost_only(test=args.test, recent_only=args.recent_only)
     elif args.mode == "dqn":
-        train_dqn_only(epochs=args.epochs, test=args.test, clear_buffer=args.clear_buffer)
+        train_dqn_only(
+            epochs=args.epochs, test=args.test,
+            clear_buffer=args.clear_buffer,
+            incremental=args.incremental,
+            warm_start=args.warm_start,
+        )

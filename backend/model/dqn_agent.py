@@ -220,6 +220,8 @@ class DQNAgent:
 
     @classmethod
     def load_active(cls) -> "DQNAgent":
+        from backend.model.model_store import ensure_local
+
         result = (
             supabase.table("model_versions")
             .select("version_tag, storage_path")
@@ -233,26 +235,16 @@ class DQNAgent:
             raise FileNotFoundError(
                 "No active DQN model. Run: python -m backend.model.train --mode dqn"
             )
-        db_path    = result.data[0]["storage_path"]
-        db_version = result.data[0]["version_tag"]
-        # Split on both / and \\ so Windows paths parse correctly on Linux
-        filename   = db_path.replace('\\', '/').split('/')[-1]
-        local_path = os.path.join(MODEL_DIR, filename)
 
-        if os.path.exists(db_path):
-            path = db_path
-        elif os.path.exists(local_path):
-            path = local_path
-            supabase.table("model_versions").update(
-                {"storage_path": f"backend/model/checkpoints/{filename}"}
-            ).eq("version_tag", db_version).execute()
-        else:
-            raise FileNotFoundError(
-                f"DQN model not found at '{db_path}' or '{local_path}'. "
-                f"Ensure checkpoints are committed to the repo."
-            )
+        storage_path = result.data[0]["storage_path"]
+        filename     = storage_path.split("/")[-1]
+        local_path   = os.path.join(MODEL_DIR, filename)
+
+        # Downloads from Supabase Storage if local file was wiped by Render
+        local_path = ensure_local(storage_path, local_path)
+
         agent = cls()
-        agent.load(path)
+        agent.load(local_path)
         return agent
 
 
@@ -273,6 +265,10 @@ def _sanitise(obj):
 
 
 def _register_dqn(version_tag, save_path, metrics, avg_reward):
+    from backend.model.model_store import upload
+
+    storage_path = upload(save_path)
+
     supabase.table("model_versions").update(
         {"is_active": False}
     ).eq("model_type", "dqn").eq("is_active", True).execute()
@@ -282,8 +278,7 @@ def _register_dqn(version_tag, save_path, metrics, avg_reward):
         "model_type":   "dqn",
         "avg_reward":   round(float(avg_reward), 4),
         "is_active":    True,
-        # Store portable relative path so it works on any machine/OS
-        "storage_path": f"backend/model/checkpoints/{os.path.basename(save_path)}",
+        "storage_path": storage_path,
         "notes":        json.dumps(_sanitise(metrics)),
     }, on_conflict="version_tag").execute()
 

@@ -31,6 +31,9 @@ The 16 features per match:
   [13] injury_impact_home    squad availability score 0-1
   [14] injury_impact_away    squad availability score 0-1
   [15] wallet_fraction       balance / starting_balance (capped 0-3)
+  [16] prob_home             XGBoost HOME probability (appended by caller)
+  [17] prob_draw             XGBoost DRAW probability (appended by caller)
+  [18] prob_away             XGBoost AWAY probability (appended by caller)
 """
 
 import os
@@ -48,8 +51,8 @@ ELO_MIN          = 1200.0
 ELO_MAX          = 1900.0
 XG_MAX           = 4.0
 GOALS_MAX        = 5.0
-STARTING_BALANCE = 10.0
-STATE_DIM        = 16
+STARTING_BALANCE = 100.0
+STATE_DIM        = 19
 
 POSITION_WEIGHTS = {"GK": 0.15, "DEF": 0.10, "MID": 0.10, "FWD": 0.12}
 DEFAULT_WEIGHT   = 0.10
@@ -96,18 +99,10 @@ def _paginate(query) -> list:
 # ─── Bulk data loader ─────────────────────────────────────────────────────────
 
 def bulk_fetch(match_ids: list) -> dict:
-    """
-    Loads all data required for feature computation in 4 queries.
-
-    Returns a dict with keys:
-      elo      : { team_id: [(match_id, elo, calculated_at), ...] sorted asc }
-      results  : { team_id: [(kickoff_time, result, is_home, home_goals, away_goals), ...] }
-      stats    : { match_id: {"home_xg": float, "away_xg": float} }
-      injuries : { team_id: impact_score }
-    """
+    """Loads all data in 4 queries. Returns cache dict."""
     print("  Bulk fetching training data (4 queries)...")
 
-    # 1. All ELO ratings sorted chronologically
+    # 1. ELO ratings
     elo_rows = _paginate(
         supabase.table("elo_ratings")
         .select("team_id, match_id, elo, calculated_at")
@@ -119,7 +114,7 @@ def bulk_fetch(match_ids: list) -> dict:
             (r["match_id"], float(r["elo"]), r["calculated_at"])
         )
 
-    # 2. All finished match results for form calculation
+    # 2. Results — NOW includes match id in each tuple for xG lookup
     result_rows = _paginate(
         supabase.table("matches")
         .select("id, home_team_id, away_team_id, kickoff_time, result, home_goals, away_goals")
@@ -130,14 +125,16 @@ def bulk_fetch(match_ids: list) -> dict:
     results_by_team = defaultdict(list)
     for r in result_rows:
         kt = r["kickoff_time"]
+        mid = r["id"]
+        # Tuple now: (kickoff_time, result, is_home, home_goals, away_goals, match_id)
         results_by_team[r["home_team_id"]].append(
-            (kt, r["result"], True, r["home_goals"], r["away_goals"])
+            (kt, r["result"], True,  r["home_goals"], r["away_goals"], mid)
         )
         results_by_team[r["away_team_id"]].append(
-            (kt, r["result"], False, r["home_goals"], r["away_goals"])
+            (kt, r["result"], False, r["home_goals"], r["away_goals"], mid)
         )
 
-    # 3. Match stats for xG
+    # 3. Match stats for real xG
     stats_rows = _paginate(
         supabase.table("match_stats")
         .select("match_id, home_xg, away_xg")
@@ -150,7 +147,7 @@ def bulk_fetch(match_ids: list) -> dict:
         for r in stats_rows
     }
 
-    # 4. Injury impact per team
+    # 4. Injury impact per team (unchanged)
     inj_rows = _paginate(
         supabase.table("team_injuries")
         .select("team_id, status, players(position)")
@@ -194,27 +191,76 @@ def _get_elo(elo_by_team: dict, team_id: int, before_time: str) -> float:
     return elo
 
 
-def _get_form(results_by_team: dict, team_id: int, n: int, before_time: str) -> float:
-    recent = [e for e in results_by_team.get(team_id, []) if e[0] < before_time][-n:]
+def _get_form(
+    results_by_team: dict,
+    team_id: int,
+    n: int,
+    before_time: str,
+    venue: str = "all",   # "all", "home", "away"
+) -> float:
+    """
+    Returns PPG (0–1) for last n matches, optionally filtered by venue.
+    venue="home" → only home matches; venue="away" → only away matches.
+    """
+    all_entries = [e for e in results_by_team.get(team_id, []) if e[0] < before_time]
+
+    if venue == "home":
+        filtered = [e for e in all_entries if e[2]]      # is_home = True
+    elif venue == "away":
+        filtered = [e for e in all_entries if not e[2]]  # is_home = False
+    else:
+        filtered = all_entries
+
+    recent = filtered[-n:]
     if not recent:
         return 0.5
+
     pts = 0
-    for _, result, is_home, _, _ in recent:
+    for _, result, is_home, _, _, _ in recent:
         if (result == "HOME" and is_home) or (result == "AWAY" and not is_home):
             pts += 3
         elif result == "DRAW":
             pts += 1
+
     return round(pts / (len(recent) * 3), 4)
 
 
-def _get_xg_stats(results_by_team: dict, team_id: int, n: int, before_time: str) -> tuple:
-    """Uses goals as xG proxy from the results cache (goals are always present)."""
+def _get_xg_stats(
+    results_by_team: dict,
+    team_id: int,
+    n: int,
+    before_time: str,
+    stats_cache: dict | None = None,    # NEW: pass cache["stats"] for real xG
+) -> tuple[float, float]:
+    """
+    Returns (avg_xg_scored, avg_xg_conceded) for the last n matches.
+
+    Priority:
+      1. Real xG from match_stats (most accurate — actual shot quality)
+      2. Goals as xG proxy (fallback when stats not yet available)
+
+    The stats_cache is keyed by match_id → {"home_xg", "away_xg"}.
+    We look up each match in the results list and check stats first.
+    """
     recent = [e for e in results_by_team.get(team_id, []) if e[0] < before_time][-n:]
     s, c   = [], []
-    for _, _, is_home, hg, ag in recent:
-        if hg is not None and ag is not None:
-            s.append(min(float(hg if is_home else ag) / GOALS_MAX, 1.0))
-            c.append(min(float(ag if is_home else hg) / GOALS_MAX, 1.0))
+
+    for kt, result, is_home, hg, ag, match_id in recent:
+        # Try real xG first
+        real = (stats_cache or {}).get(match_id)
+        if real and real.get("home_xg") is not None and real.get("away_xg") is not None:
+            xg_s = float(real["home_xg"] if is_home else real["away_xg"])
+            xg_c = float(real["away_xg"] if is_home else real["home_xg"])
+        elif hg is not None and ag is not None:
+            # Goals fallback — consistent with the proxy used in scrape_stats
+            xg_s = float(hg if is_home else ag) * 0.30  # same conversion as scrape_stats
+            xg_c = float(ag if is_home else hg) * 0.30
+        else:
+            continue
+
+        s.append(min(xg_s / XG_MAX, 1.0))
+        c.append(min(xg_c / XG_MAX, 1.0))
+
     avg_s = round(float(np.mean(s)), 4) if s else 0.3
     avg_c = round(float(np.mean(c)), 4) if c else 0.3
     return avg_s, avg_c
@@ -246,39 +292,39 @@ def build_state_vector(
     cache:          Optional[dict] = None,
 ) -> np.ndarray:
     """
-    Builds the 16-dim state vector for a single match.
-
-    Pass cache=bulk_fetch(...) during training for maximum speed.
-    Leave cache=None at inference time (single upcoming match).
+    Returns a 19-dim state vector. Indices [16][17][18] are prob_home/draw/away
+    and are initialised to 0.0 here — the caller APPENDS XGBoost probs after
+    calling predict_probabilities(), it no longer overwrites existing indices.
     """
     cutoff = before_date or kickoff_time
 
     if cache:
-        home_elo_raw       = _get_elo(cache["elo"], home_team_id, cutoff)
-        away_elo_raw       = _get_elo(cache["elo"], away_team_id, cutoff)
-        home_form_5        = _get_form(cache["results"], home_team_id,  5, cutoff)
-        away_form_5        = _get_form(cache["results"], away_team_id,  5, cutoff)
-        home_form_10       = _get_form(cache["results"], home_team_id, 10, cutoff)
-        away_form_10       = _get_form(cache["results"], away_team_id, 10, cutoff)
-        home_xg_s, home_xg_c = _get_xg_stats(cache["results"], home_team_id, 5, cutoff)
-        away_xg_s, away_xg_c = _get_xg_stats(cache["results"], away_team_id, 5, cutoff)
-        home_goals         = _get_goals_avg(cache["results"], home_team_id, 5, cutoff)
-        away_goals         = _get_goals_avg(cache["results"], away_team_id, 5, cutoff)
-        injury_home        = cache["injuries"].get(home_team_id, 0.0)
-        injury_away        = cache["injuries"].get(away_team_id, 0.0)
+        sc = cache["stats"]  # stats_cache for real xG
+        home_elo_raw    = _get_elo(cache["elo"], home_team_id, cutoff)
+        away_elo_raw    = _get_elo(cache["elo"], away_team_id, cutoff)
+        home_form_5     = _get_form(cache["results"], home_team_id,  5, cutoff, "all")
+        away_form_5     = _get_form(cache["results"], away_team_id,  5, cutoff, "all")
+        home_form_home  = _get_form(cache["results"], home_team_id,  5, cutoff, "home")
+        away_form_away  = _get_form(cache["results"], away_team_id,  5, cutoff, "away")
+        home_xg_s, home_xg_c = _get_xg_stats(cache["results"], home_team_id, 5, cutoff, sc)
+        away_xg_s, away_xg_c = _get_xg_stats(cache["results"], away_team_id, 5, cutoff, sc)
+        home_goals      = _get_goals_avg(cache["results"], home_team_id, 5, cutoff)
+        away_goals      = _get_goals_avg(cache["results"], away_team_id, 5, cutoff)
+        injury_home     = cache["injuries"].get(home_team_id, 0.0)
+        injury_away     = cache["injuries"].get(away_team_id, 0.0)
     else:
-        home_elo_raw       = _db_get_elo(home_team_id)
-        away_elo_raw       = _db_get_elo(away_team_id)
-        home_form_5        = _db_get_form(home_team_id,  5, cutoff)
-        away_form_5        = _db_get_form(away_team_id,  5, cutoff)
-        home_form_10       = _db_get_form(home_team_id, 10, cutoff)
-        away_form_10       = _db_get_form(away_team_id, 10, cutoff)
+        home_elo_raw    = _db_get_elo(home_team_id)
+        away_elo_raw    = _db_get_elo(away_team_id)
+        home_form_5     = _db_get_form(home_team_id,  5, cutoff, "all")
+        away_form_5     = _db_get_form(away_team_id,  5, cutoff, "all")
+        home_form_home  = _db_get_form(home_team_id,  5, cutoff, "home")
+        away_form_away  = _db_get_form(away_team_id,  5, cutoff, "away")
         home_xg_s, home_xg_c = _db_get_xg(home_team_id, 5, cutoff)
         away_xg_s, away_xg_c = _db_get_xg(away_team_id, 5, cutoff)
-        home_goals         = _db_get_goals(home_team_id, 5, cutoff)
-        away_goals         = _db_get_goals(away_team_id, 5, cutoff)
-        injury_home        = _db_injury_impact(home_team_id)
-        injury_away        = _db_injury_impact(away_team_id)
+        home_goals      = _db_get_goals(home_team_id, 5, cutoff)
+        away_goals      = _db_get_goals(away_team_id, 5, cutoff)
+        injury_home     = _db_injury_impact(home_team_id)
+        injury_away     = _db_injury_impact(away_team_id)
 
     home_elo    = _norm_elo(home_elo_raw)
     away_elo    = _norm_elo(away_elo_raw)
@@ -288,14 +334,15 @@ def build_state_vector(
     wallet_frac = float(np.clip(wallet_balance / STARTING_BALANCE, 0.0, 3.0))
 
     return np.array([
-        home_elo, away_elo, elo_diff,
-        home_form_5, away_form_5,
-        home_form_10, away_form_10,
-        home_xg_s, away_xg_s,
-        home_xg_c, away_xg_c,
-        home_goals, away_goals,
-        injury_home, injury_away,
-        wallet_frac,
+        home_elo, away_elo, elo_diff,           # [0][1][2]
+        home_form_5, away_form_5,               # [3][4]
+        home_form_home, away_form_away,         # [5][6]  NEW — replaces form_10
+        home_xg_s, away_xg_s,                  # [7][8]
+        home_xg_c, away_xg_c,                  # [9][10]
+        home_goals, away_goals,                 # [11][12]
+        injury_home, injury_away,               # [13][14]
+        wallet_frac,                            # [15]
+        0.0, 0.0, 0.0,                          # [16][17][18] — XGB probs, filled by caller
     ], dtype=np.float32)
 
 
@@ -347,12 +394,25 @@ def _db_get_elo(team_id: int) -> float:
     return float(r.data[0]["elo"]) if r.data else 1500.0
 
 
-def _db_get_form(team_id: int, n: int, before: str) -> float:
-    rows = supabase.table("matches").select("home_team_id, away_team_id, result")\
-        .eq("status", "FINISHED").or_(f"home_team_id.eq.{team_id},away_team_id.eq.{team_id}")\
-        .lt("kickoff_time", before).order("kickoff_time", desc=True).limit(n).execute().data
+def _db_get_form(team_id: int, n: int, before: str, venue: str = "all") -> float:
+    rows = supabase.table("matches")\
+        .select("id, home_team_id, away_team_id, result")\
+        .eq("status", "FINISHED")\
+        .or_(f"home_team_id.eq.{team_id},away_team_id.eq.{team_id}")\
+        .lt("kickoff_time", before)\
+        .order("kickoff_time", desc=True)\
+        .limit(n * 3)\
+        .execute().data
+
+    if venue == "home":
+        rows = [r for r in rows if r["home_team_id"] == team_id]
+    elif venue == "away":
+        rows = [r for r in rows if r["away_team_id"] == team_id]
+
+    rows = rows[:n]
     if not rows:
         return 0.5
+
     pts = sum(
         3 if (r["result"] == "HOME" and r["home_team_id"] == team_id) or
              (r["result"] == "AWAY" and r["away_team_id"] == team_id)

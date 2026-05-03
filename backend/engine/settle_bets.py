@@ -19,6 +19,7 @@ which is invoked by the ingest_results GitHub Actions workflow.
 
 import os
 import sys
+import numpy as np
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -29,7 +30,7 @@ from backend.model.features import build_state_vector
 # Reward normalisation for RL replay buffer.
 # We store pnl / STARTING_BALANCE so rewards are in a consistent range
 # regardless of the actual wallet size at time of bet.
-STARTING_BALANCE = 10.0
+STARTING_BALANCE = 100.0
 
 
 def get_open_bets() -> list[dict]:
@@ -135,28 +136,52 @@ def update_prediction_accuracy(match_id: int, result: str) -> None:
 
 def store_rl_transition(bet: dict, outcome: str, pnl: float) -> None:
     """
-    Stores the (state, action, reward) transition from this real bet
-    into the replay buffer for future DQN retraining.
+    Stores the settled bet as a replay buffer transition.
 
-    This is what makes the model learn from live betting — every settled
-    bet with real bookmaker odds becomes a training sample with a
-    genuine reward signal (not implied-odds circular training).
+    Reward is normalised to match the training reward scale:
+      training uses TRAINING_STAKE=1.0, rewards clipped to [-2, +2]
+      live rewards must use the same normalisation so the DQN learns
+      from real transitions at the same magnitude.
     """
-    match_data = bet["matches"]
+    match = bet.get("matches", {})
+
+    # Resolve team IDs from the match join — do not pass None
+    home_team_id = None
+    away_team_id = None
+    try:
+        match_row = (
+            supabase.table("matches")
+            .select("home_team_id, away_team_id")
+            .eq("id", bet["match_id"])
+            .single()
+            .execute()
+        )
+        home_team_id = match_row.data["home_team_id"]
+        away_team_id = match_row.data["away_team_id"]
+    except Exception:
+        return   # can't build state without team IDs
+
     try:
         state = build_state_vector(
             match_id       = bet["match_id"],
-            home_team_id   = None,   # will use DB fallback
-            away_team_id   = None,
+            home_team_id   = home_team_id,
+            away_team_id   = away_team_id,
             kickoff_time   = "",
             wallet_balance = float(bet["balance_before"]),
         )
     except Exception:
-        return  # skip if state build fails
+        return
 
     ACTION_MAP = {"BET_HOME": 0, "BET_DRAW": 1, "BET_AWAY": 2, "PASS": 3}
     action     = ACTION_MAP.get(bet["action"], 3)
-    reward     = round(pnl / STARTING_BALANCE, 6)
+
+    # Normalise reward to match training scale (TRAINING_STAKE=1.0, clipped ±2)
+    stake = float(bet["stake"])
+    if stake > 0:
+        normalised_pnl = pnl / stake   # convert to per-unit-staked (same as TRAINING_STAKE)
+    else:
+        normalised_pnl = 0.0
+    reward = float(np.clip(normalised_pnl, -2.0, 2.0))
 
     replay_buffer.push(
         match_id    = bet["match_id"],

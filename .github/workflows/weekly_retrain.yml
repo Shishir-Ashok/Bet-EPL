@@ -49,28 +49,18 @@ jobs:
           RENDER_API_SECRET: ${{ secrets.RENDER_API_SECRET }}
         run: |
           FORCE=${{ inputs.force_promote || 'false' }}
-          echo "Triggering weekly retrain (force_promote=$FORCE)..."
-          # Render free tier takes up to 60s to wake up from sleep.
-          # First request often times out — that's normal.
           for i in 1 2 3 4 5; do
             STATUS=$(curl -s -o response.json -w "%{http_code}" \
               -X POST "$RENDER_SERVICE_URL/trigger/retrain" \
               -H "X-API-Secret: $RENDER_API_SECRET" \
               -H "Content-Type: application/json" \
-              -d "{\"force_promote\": $FORCE}" \
+              -d "{\"force_promote\": $FORCE, \"incremental\": true, \"warm_start\": true}" \
               --max-time 90)
             echo "Attempt $i: HTTP $STATUS"
-            if [ "$STATUS" = "200" ]; then
-              echo "Retraining triggered successfully"
+            if [ "$STATUS" = "200" ] || [ "$STATUS" = "202" ]; then
               cat response.json
               exit 0
-            elif [ "$STATUS" = "202" ]; then
-              echo "Retraining accepted (async) — Render will run it in background"
-              exit 0
             fi
-            WAIT=$((30 * i))
-            echo "Sleeping ${WAIT}s before retry..."
-            sleep $WAIT
+            sleep $((30 * i))
           done
-          echo "ERROR: Could not reach Render service after 5 attempts"
-          exit 1   # This one DOES fail loudly — retraining is important
+          exit 1

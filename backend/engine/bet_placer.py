@@ -36,7 +36,7 @@ from backend.engine.kelly        import best_bet, remove_vig
 
 # Minimum Q-value advantage over PASS for the DQN to confirm a bet.
 # If the DQN isn't sure enough, Kelly alone decides (pure XGBoost + Kelly mode).
-DQN_CONFIDENCE_GATE = 0.3
+from backend.engine.config import DQN_CONFIDENCE_GATE
 
 # Use DQN as a filter. If False, uses XGBoost + Kelly only (simpler but less adaptive).
 USE_DQN_FILTER = True
@@ -91,29 +91,23 @@ def get_upcoming_matches() -> list[dict]:
 
 
 def get_best_odds(match_id: int) -> dict | None:
-    """
-    Returns the best available decimal odds for a match across all bookmakers.
-    Returns None if no odds have been fetched yet for this match.
-    """
+    """Single Pinnacle/Marathonbet row per match — no max() needed."""
     result = (
         supabase.table("odds")
-        .select("home_odds, draw_odds, away_odds, bookmaker, fetched_at")
+        .select("home_odds, draw_odds, away_odds, bookmaker")
         .eq("match_id", match_id)
-        .order("fetched_at", desc=True)
-        .limit(20)
+        .limit(1)
         .execute()
         .data
     )
-
     if not result:
         return None
-
-    # Best odds per outcome across all bookmakers
+    row = result[0]
     return {
-        "home_odds": max(r["home_odds"] for r in result),
-        "draw_odds": max(r["draw_odds"] for r in result),
-        "away_odds": max(r["away_odds"] for r in result),
-        "bookmaker": "best_available",
+        "home_odds": row["home_odds"],
+        "draw_odds": row["draw_odds"],
+        "away_odds": row["away_odds"],
+        "bookmaker": row["bookmaker"],
     }
 
 
@@ -241,9 +235,9 @@ def run(place_bets: bool = True) -> dict:
         # ── 2. XGBoost probabilities ──────────────────────────────────────────
         try:
             probs = predict_probabilities(xgb_model, state)
-            state[7] = float(probs["HOME"])
-            state[8] = float(probs["DRAW"])
-            state[9] = float(probs["AWAY"])
+            state[16] = float(probs["HOME"])
+            state[17] = float(probs["DRAW"])
+            state[18] = float(probs["AWAY"])
             print(f"    XGBoost: H {probs['HOME']:.1%}  D {probs['DRAW']:.1%}  A {probs['AWAY']:.1%}")
         except Exception as e:
             print(f"    ✗ XGBoost prediction failed: {e}")

@@ -35,7 +35,7 @@ from backend.engine.kelly        import best_bet, remove_vig
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 DEFAULT_SEASONS   = ["2020-21", "2021-22", "2022-23", "2023-24", "2024-25"]
-STARTING_BALANCE  = 10.0
+STARTING_BALANCE  = 100.0
 DQN_GATE          = 0.3     # Q(bet) - Q(pass) threshold
 
 # Implied odds used when no bookmaker odds exist for historical matches.

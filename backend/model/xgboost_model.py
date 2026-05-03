@@ -253,16 +253,11 @@ def train(
 # ─── Inference ────────────────────────────────────────────────────────────────
 
 def load_model(version_tag: Optional[str] = None) -> CalibratedModel:
-    """
-    Loads the active (or specified) XGBoost model from disk.
+    from backend.model.model_store import ensure_local
 
-    The storage_path in the DB may be an absolute path from the machine
-    that trained the model (e.g. a Windows path). We always try the DB
-    path first, then fall back to resolving the filename against MODEL_DIR
-    so Render (Linux) can find the file even if the DB path is a Windows path.
-    """
     if version_tag:
-        path = os.path.join(MODEL_DIR, f"{version_tag}.pkl")
+        local_path = os.path.join(MODEL_DIR, f"{version_tag}.pkl")
+        storage_path = f"checkpoints/{version_tag}.pkl"
     else:
         result = (
             supabase.table("model_versions")
@@ -278,34 +273,14 @@ def load_model(version_tag: Optional[str] = None) -> CalibratedModel:
                 "No active XGBoost model. Run: "
                 "python -m backend.model.train --mode xgboost"
             )
-        db_path     = result.data[0]["storage_path"]
-        db_version  = result.data[0]["version_tag"]
+        storage_path = result.data[0]["storage_path"]
+        filename     = storage_path.split("/")[-1]
+        local_path   = os.path.join(MODEL_DIR, filename)
 
-        # Try DB path first, then resolve filename against MODEL_DIR
-        # This handles the case where the DB stores a Windows absolute path
-        # but the model is running on Linux (Render)
-        # Split on both / and \ so Windows paths parse correctly on Linux
-        filename = db_path.replace('\\', '/').replace('\\\\', '/').split('/')[-1]
-        local_path = os.path.join(MODEL_DIR, filename)
+    # ensure_local downloads from Storage if not on disk (handles Render restarts)
+    local_path = ensure_local(storage_path, local_path)
 
-        if os.path.exists(db_path):
-            path = db_path
-        elif os.path.exists(local_path):
-            path = local_path
-            # Update DB with the correct path for this environment
-            supabase.table("model_versions").update(
-                {"storage_path": f"backend/model/checkpoints/{filename}"}
-            ).eq("version_tag", db_version).execute()
-        else:
-            raise FileNotFoundError(
-                f"Model file not found at '{db_path}' or '{local_path}'. "
-                f"Ensure checkpoints are committed to the repo."
-            )
-
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Model file not found: {path}")
-
-    with open(path, "rb") as f:
+    with open(local_path, "rb") as f:
         return pickle.load(f)
 
 
@@ -323,12 +298,13 @@ def get_feature_importance(model: CalibratedModel) -> list[dict]:
     FEATURE_NAMES = [
         "home_elo", "away_elo", "elo_diff",
         "home_form_5", "away_form_5",
-        "home_form_10", "away_form_10",
+        "home_form_home", "away_form_away",   # [5][6] — venue split
         "home_xg_scored", "away_xg_scored",
         "home_xg_conceded", "away_xg_conceded",
         "home_goals_avg", "away_goals_avg",
         "injury_home", "injury_away",
         "wallet_fraction",
+        "prob_home", "prob_draw", "prob_away",  # [16][17][18]
     ]
     base = getattr(model, "estimator", model)
     if hasattr(base, "feature_importances_"):
@@ -342,7 +318,12 @@ def get_feature_importance(model: CalibratedModel) -> list[dict]:
 
 # ─── DB ───────────────────────────────────────────────────────────────────────
 
-def _register_model(version_tag, metrics, save_path, training_games):
+def _register_model(version_tag, metrics, local_save_path, training_games):
+    from backend.model.model_store import upload
+
+    # Upload to Supabase Storage so Render can find it after restarts
+    storage_path = upload(local_save_path)
+
     supabase.table("model_versions").update(
         {"is_active": False}
     ).eq("model_type", "xgboost").eq("is_active", True).execute()
@@ -353,9 +334,8 @@ def _register_model(version_tag, metrics, save_path, training_games):
         "training_games": training_games,
         "val_log_loss":   metrics["val_log_loss"],
         "is_active":      True,
-        # Store portable relative path so it works on any machine/OS
-        "storage_path":   f"backend/model/checkpoints/{os.path.basename(save_path)}",
+        "storage_path":   storage_path,
         "notes":          json.dumps(metrics),
     }).execute()
 
-    print(f"  Registered: {version_tag} (is_active=True)")
+    print(f"  Registered: {version_tag} (is_active=True, stored in Supabase Storage)")
