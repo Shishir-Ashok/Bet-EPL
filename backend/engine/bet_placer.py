@@ -31,8 +31,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from backend.db import supabase
 from backend.model.xgboost_model import load_model as load_xgb, predict_probabilities
 from backend.model.dqn_agent     import DQNAgent
-from backend.model.features      import build_state_vector
-from backend.engine.kelly        import best_bet, remove_vig
+from backend.model.features      import build_state_vector,build_dqn_state
+from backend.engine.kelly        import best_bet
+from backend.engine.kelly        import remove_vig as _remove_vig
 
 # Minimum Q-value advantage over PASS for the DQN to confirm a bet.
 # If the DQN isn't sure enough, Kelly alone decides (pure XGBoost + Kelly mode).
@@ -62,7 +63,7 @@ def get_upcoming_matches() -> list[dict]:
     """Returns scheduled matches that don't yet have an open bet."""
     scheduled = (
         supabase.table("matches")
-        .select("id, home_team_id, away_team_id, kickoff_time, season, "
+        .select("id, home_team_id, away_team_id, kickoff_time, "
                 "home:teams!matches_home_team_id_fkey(name, short_name), "
                 "away:teams!matches_away_team_id_fkey(name, short_name)")
         .eq("status", "SCHEDULED")
@@ -107,7 +108,7 @@ def get_best_odds(match_id: int) -> dict | None:
         "home_odds": row["home_odds"],
         "draw_odds": row["draw_odds"],
         "away_odds": row["away_odds"],
-        "bookmaker": row["bookmaker"],
+        "bookmaker": row["bookmaker"],   # actual bookmaker name (pinnacle or marathonbet)
     }
 
 
@@ -219,41 +220,54 @@ def run(place_bets: bool = True) -> dict:
         away = match["away"]["short_name"]
         print(f"\n  {home} vs {away}  ({match['kickoff_time'][:10]})")
 
-        # ── 1. Build state vector ─────────────────────────────────────────────
+
+        # ── 1. Get bookmaker odds (moved before state construction) ──────────
+        odds_data = get_best_odds(match["id"])
+
+        # ── 2. Build state vector ─────────────────────────────────────────────
         try:
-            state = build_state_vector(
-                match_id       = match["id"],
-                home_team_id   = match["home_team_id"],
-                away_team_id   = match["away_team_id"],
-                kickoff_time   = match["kickoff_time"],
-                wallet_balance = balance,
+            xgb_vec = build_state_vector(
+                home_team_id = match["home_team_id"],
+                away_team_id = match["away_team_id"],
+                kickoff_time = match["kickoff_time"],
             )
         except Exception as e:
             print(f"    ✗ State vector failed: {e}")
             continue
-
-        # ── 2. XGBoost probabilities ──────────────────────────────────────────
+ 
+        # ── 3. XGBoost probabilities + DQN state ────────────────────────────
         try:
-            probs = predict_probabilities(xgb_model, state)
-            state[16] = float(probs["HOME"])
-            state[17] = float(probs["DRAW"])
-            state[18] = float(probs["AWAY"])
+            probs   = predict_probabilities(xgb_model, xgb_vec)
+            implied = None
+            if odds_data:
+                fair    = _remove_vig(
+                    odds_data["home_odds"],
+                    odds_data["draw_odds"],
+                    odds_data["away_odds"],
+                )
+                implied = {
+                    "HOME": fair["HOME"],
+                    "DRAW": fair["DRAW"],
+                    "AWAY": fair["AWAY"],
+                }
+ 
+            state = build_dqn_state(
+                xgb_vector     = xgb_vec,
+                xgb_probs      = probs,
+                implied_probs  = implied,
+                wallet_balance = balance,
+            )
             print(f"    XGBoost: H {probs['HOME']:.1%}  D {probs['DRAW']:.1%}  A {probs['AWAY']:.1%}")
         except Exception as e:
             print(f"    ✗ XGBoost prediction failed: {e}")
             continue
-
-        # ── 3. Get bookmaker odds ─────────────────────────────────────────────
-        odds_data = get_best_odds(match["id"])
+ 
         if not odds_data:
             print(f"    ⚠ No odds available yet — saving prediction only")
             pred_id = save_prediction(match["id"], probs, "PASS", 0.0, model_version)
             results.append({"match": f"{home} vs {away}", "action": "PASS", "reason": "no odds"})
             continue
 
-        fair = remove_vig(odds_data["home_odds"], odds_data["draw_odds"], odds_data["away_odds"])
-        print(f"    Odds:   H {odds_data['home_odds']}  D {odds_data['draw_odds']}  A {odds_data['away_odds']}  (vig {fair['vig_pct']}%)")
-        print(f"    Fair:   H {fair['HOME']:.1%}  D {fair['DRAW']:.1%}  A {fair['AWAY']:.1%}")
 
         # ── 4. Kelly sizing ───────────────────────────────────────────────────
         bet = best_bet(

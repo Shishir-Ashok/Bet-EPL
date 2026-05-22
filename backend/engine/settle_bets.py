@@ -19,13 +19,14 @@ which is invoked by the ingest_results GitHub Actions workflow.
 
 import os
 import sys
+import math
 import numpy as np
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from backend.db import supabase
 from backend.model import replay_buffer
-from backend.model.features import build_state_vector
+from backend.model.features import build_state_vector, build_dqn_state
 
 # Reward normalisation for RL replay buffer.
 # We store pnl / STARTING_BALANCE so rewards are in a consistent range
@@ -71,17 +72,17 @@ def get_wallet() -> dict:
 
 
 def settle_bet(
-    bet_id:      str,
-    outcome:     str,
-    pnl:         float,
+    bet_id:        str,
+    outcome:       str,
+    pnl:           float,
     balance_after: float,
+    settled_at:    str | None = None,   # ← add this
 ) -> None:
-    """Updates a bet record with settlement information."""
     supabase.table("bets").update({
         "outcome":       outcome,
         "pnl":           round(pnl, 2),
         "balance_after": round(balance_after, 2),
-        "settled_at":    datetime.now(timezone.utc).isoformat(),
+        "settled_at":    settled_at or datetime.now(timezone.utc).isoformat(),
     }).eq("id", bet_id).execute()
 
 
@@ -125,7 +126,6 @@ def update_prediction_accuracy(match_id: int, result: str) -> None:
         # Calculate log-loss for this prediction
         prob_map  = {"HOME": pred["prob_home"], "DRAW": pred["prob_draw"], "AWAY": pred["prob_away"]}
         true_prob = prob_map.get(result, 0.0001)
-        import math
         log_loss  = round(-math.log(max(float(true_prob), 1e-7)), 6)
 
         supabase.table("predictions").update({
@@ -134,7 +134,7 @@ def update_prediction_accuracy(match_id: int, result: str) -> None:
         }).eq("id", pred["id"]).execute()
 
 
-def store_rl_transition(bet: dict, outcome: str, pnl: float) -> None:
+def store_rl_transition(bet: dict, pnl: float) -> None:
     """
     Stores the settled bet as a replay buffer transition.
 
@@ -143,7 +143,6 @@ def store_rl_transition(bet: dict, outcome: str, pnl: float) -> None:
       live rewards must use the same normalisation so the DQN learns
       from real transitions at the same magnitude.
     """
-    match = bet.get("matches", {})
 
     # Resolve team IDs from the match join — do not pass None
     home_team_id = None
@@ -162,11 +161,35 @@ def store_rl_transition(bet: dict, outcome: str, pnl: float) -> None:
         return   # can't build state without team IDs
 
     try:
-        state = build_state_vector(
-            match_id       = bet["match_id"],
-            home_team_id   = home_team_id,
-            away_team_id   = away_team_id,
-            kickoff_time   = "",
+        kickoff_time = match_row.data.get("kickoff_time", "") or ""
+        xgb_vec = build_state_vector(
+            home_team_id = home_team_id,
+            away_team_id = away_team_id,
+            kickoff_time = kickoff_time,
+        )
+
+        # Fetch saved prediction probs from DB (they were stored when the bet was placed)
+        pred_row = (
+            supabase.table("predictions")
+            .select("prob_home, prob_draw, prob_away")
+            .eq("match_id", bet["match_id"])
+            .limit(1)
+            .execute()
+            .data
+        )
+        if pred_row:
+            xgb_probs = {
+                "HOME": pred_row[0]["prob_home"],
+                "DRAW": pred_row[0]["prob_draw"],
+                "AWAY": pred_row[0]["prob_away"],
+            }
+        else:
+            xgb_probs = {"HOME": 0.333, "DRAW": 0.333, "AWAY": 0.333}
+
+        state = build_dqn_state(
+            xgb_vector     = xgb_vec,
+            xgb_probs      = xgb_probs,
+            implied_probs  = None,                           # odds gone by settlement time
             wallet_balance = float(bet["balance_before"]),
         )
     except Exception:
@@ -269,7 +292,7 @@ def run() -> dict:
         update_prediction_accuracy(bet["match_id"], result)
 
         # Store RL transition for future retraining
-        store_rl_transition(bet, outcome, pnl)
+        store_rl_transition(bet, pnl)
 
         total_pnl     += pnl
         settled_count += 1

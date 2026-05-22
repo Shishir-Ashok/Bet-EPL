@@ -1,0 +1,119 @@
+# .github/workflows/monthly_retrain.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# MONTHLY MODEL RETRAINING
+# Runs on the 1st of each month at 06:00 UTC.
+#
+# Architecture: training runs ON Render (FastAPI server), not in this runner.
+# This workflow only wakes the Render service and calls /trigger/retrain.
+# Render handles: performance evaluation → decide what to retrain →
+#   XGBoost (if log-loss degraded) → DQN warm-start (if ROI < threshold)
+#
+# Why monthly rather than weekly?
+#   - The performance evaluator looks at 60 days of live bet outcomes.
+#     Weekly evaluation would act on too little signal (3-8 bets).
+#   - Full XGBoost retrains benefit from a full month of new results.
+#   - Render free tier: 750h/month limit. Monthly = ~2-4h used.
+#
+# Manual trigger: Actions → monthly_retrain → Run workflow
+#   force_full  : skip performance check and retrain both models
+#   mode        : incremental (default) or full (resets DQN from scratch)
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Monthly model retraining
+
+on:
+  schedule:
+    - cron: "0 6 1 * *" # 06:00 UTC, 1st of every month
+  workflow_dispatch:
+    inputs:
+      force_full:
+        description: "Force full retrain (skip performance evaluation)"
+        required: false
+        default: "false"
+        type: boolean
+      mode:
+        description: "DQN training mode"
+        required: false
+        default: "incremental"
+        type: choice
+        options: ["incremental", "full"]
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45 # monthly full retrain can take longer than weekly
+
+    steps:
+      - name: Wake Render service
+        id: wake
+        run: |
+          echo "Pinging Render service..."
+          MAX_ATTEMPTS=20        # 20 × 15s = 5 minutes (cold starts can be slow)
+          ATTEMPT=0
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time 15 \
+              "${{ secrets.RENDER_SERVICE_URL }}/health")
+            echo "Attempt $((ATTEMPT+1))/${MAX_ATTEMPTS}: HTTP ${STATUS}"
+            if [ "$STATUS" = "200" ]; then
+              echo "Service ready."
+              exit 0
+            fi
+            ATTEMPT=$((ATTEMPT+1))
+            sleep 15
+          done
+          echo "ERROR: Render did not become ready within 5 minutes."
+          exit 1
+
+      - name: Run monthly retrain on Render
+        env:
+          RENDER_SERVICE_URL: ${{ secrets.RENDER_SERVICE_URL }}
+          RENDER_API_SECRET: ${{ secrets.RENDER_API_SECRET }}
+        run: |
+          FORCE="${{ inputs.force_full || 'false' }}"
+          MODE="${{ inputs.mode || 'incremental' }}"
+
+          PAYLOAD=$(cat <<EOF
+          {
+            "force_full":   ${FORCE},
+            "mode":         "${MODE}",
+            "warm_start":   true,
+            "incremental":  $([ "${MODE}" = "incremental" ] && echo true || echo false)
+          }
+          EOF
+          )
+
+          echo "Payload: ${PAYLOAD}"
+
+          # Retry up to 5 times with exponential back-off.
+          # 202 is acceptable — Render may queue the job and respond immediately.
+          for i in 1 2 3 4 5; do
+            STATUS=$(curl -s -o response.json -w "%{http_code}" \
+              -X POST "${RENDER_SERVICE_URL}/trigger/monthly-retrain" \
+              -H "X-API-Secret: ${RENDER_API_SECRET}" \
+              -H "Content-Type: application/json" \
+              -d "${PAYLOAD}" \
+              --max-time 120)
+
+            echo "Attempt ${i}: HTTP ${STATUS}"
+            cat response.json
+            echo ""
+
+            if [ "$STATUS" = "200" ] || [ "$STATUS" = "202" ]; then
+              echo "Retrain triggered successfully."
+              exit 0
+            fi
+
+            WAIT=$((30 * i))
+            echo "Retrying in ${WAIT}s..."
+            sleep ${WAIT}
+          done
+
+          echo "ERROR: All retrain attempts failed."
+          exit 1
+
+      - name: Report outcome
+        if: always()
+        run: |
+          echo "Workflow complete. Check Render logs for retrain details."
+          echo "Supabase model_versions table will show the new active version."

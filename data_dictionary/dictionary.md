@@ -231,17 +231,17 @@ Every virtual bet placed. The core P&L log. Settled after results come in.
 
 DQN replay buffer stored in Postgres. Each row is one `(state, action, reward, next_state, done)` transition. The DQN training loop samples random batches from this table.
 
-| Column        | Type             | Description                                                    |
-| ------------- | ---------------- | -------------------------------------------------------------- |
-| `id`          | bigserial PK     | Monotonically increasing — used for recency-based pruning      |
-| `match_id`    | int FK → matches | Match this transition came from                                |
-| `state`       | jsonb            | 16-element float array — the state vector before the action    |
-| `next_state`  | jsonb            | 16-element float array for the next match. Null if `done=true` |
-| `action`      | int              | 0=BET_HOME, 1=BET_DRAW, 2=BET_AWAY, 3=PASS                     |
-| `reward`      | numeric(8,4)     | P&L normalised by starting balance (`pnl / 10.0`)              |
-| `done`        | boolean          | True at end of a season or when the bankroll hits zero         |
-| `episode_num` | int              | Training epoch number — used to track learning progress        |
-| `created_at`  | timestamptz      | Insertion timestamp                                            |
+| Column        | Type             | Description                                                     |
+| ------------- | ---------------- | --------------------------------------------------------------- |
+| `id`          | bigserial PK     | Monotonically increasing — used for recency-based pruning       |
+| `match_id`    | int FK → matches | Match this transition came from                                 |
+| `state`       | jsonb            | 24-element float array — the DQN state vector before the action |
+| `next_state`  | jsonb            | 24-element float array for the next match. `Null` if done=true  |
+| `action`      | int              | 0=BET_HOME, 1=BET_DRAW, 2=BET_AWAY, 3=PASS                      |
+| `reward`      | numeric(8,4)     | P&L normalised by starting balance (`pnl / 10.0`)               |
+| `done`        | boolean          | True at end of a season or when the bankroll hits zero          |
+| `episode_num` | int              | Training epoch number — used to track learning progress         |
+| `created_at`  | timestamptz      | Insertion timestamp                                             |
 
 **Note:** The buffer is capped at 5,000 rows. Older transitions are pruned after each weekly retraining run.
 

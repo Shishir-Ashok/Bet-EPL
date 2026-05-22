@@ -31,13 +31,13 @@ Deploying to Render:
 import os
 import sys
 import logging
+from pydantic import BaseModel
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-
+from fastapi import FastAPI, HTTPException, Depends, Header, BackgroundTasks, Request, Body
+from backend.model.train import evaluate_and_decide_retrain, train_xgboost_only, train_dqn_only
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -298,6 +298,45 @@ async def _run_retrain(epochs: int, force_promote: bool):
 
     except Exception as e:
         log.error(f"Retraining failed: {e}", exc_info=True)
+
+
+@app.post("/trigger/monthly-retrain")
+async def trigger_monthly_retrain(
+    request: Request,
+    background_tasks: BackgroundTasks,
+):
+    _require_api_secret(request)
+
+    body = await request.json()
+    force_full  = body.get("force_full",  False)
+    mode        = body.get("mode",        "incremental")
+    warm_start  = body.get("warm_start",  True)
+    incremental = body.get("incremental", True)
+
+    def _run():
+        if force_full:
+            print("Monthly retrain: force_full=True — skipping evaluation")
+            train_xgboost_only()
+            train_dqn_only(incremental=False, warm_start=False)
+            return
+
+        decision = evaluate_and_decide_retrain()
+
+        if not decision["retrain_xgb"] and not decision["retrain_dqn"]:
+            print("Monthly retrain: both models healthy — nothing to do")
+            return
+
+        if decision["retrain_xgb"]:
+            train_xgboost_only()
+
+        if decision["retrain_dqn"]:
+            train_dqn_only(
+                incremental = incremental,
+                warm_start  = warm_start,
+            )
+
+    background_tasks.add_task(_run)
+    return {"status": "accepted", "message": "Monthly retrain queued"}
 
 
 # ─── Status endpoints (no auth — safe to expose) ─────────────────────────────

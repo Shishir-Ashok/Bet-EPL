@@ -37,7 +37,6 @@ import os
 import sys
 import json
 import numpy as np
-from datetime import datetime
 from typing import Optional
 
 import torch
@@ -47,7 +46,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from backend.db import supabase
-from backend.model.features import STATE_DIM
+from backend.model.features import DQN_STATE_DIM
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -77,12 +76,6 @@ EPS_START = 1.0
 EPS_END   = 0.05
 EPS_DECAY = 0.905
 
-# PASS is neutral (0.0) — not penalised.
-# The agent learns PASS is better than a losing bet on its own.
-# A negative PASS_PENALTY creates a pressure to always bet,
-# which was masking the zero-reward problem.
-PASS_PENALTY = 0.0
-
 
 # ─── Network ──────────────────────────────────────────────────────────────────
 
@@ -95,7 +88,7 @@ class QNetwork(nn.Module):
     gradients vanish. BatchNorm instead provides regularisation.
     """
 
-    def __init__(self, state_dim: int = STATE_DIM, action_dim: int = ACTION_DIM):
+    def __init__(self, state_dim: int = DQN_STATE_DIM, action_dim: int = ACTION_DIM):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(state_dim, 128),
@@ -191,11 +184,12 @@ class DQNAgent:
         self.epsilon = max(EPS_END, self.epsilon * EPS_DECAY)
 
     def get_confidence(self, state: np.ndarray) -> float:
-        with torch.no_grad():
-            state_t = torch.FloatTensor(state).unsqueeze(0).to(self.device)
-            q_vals  = self.online_net(state_t)[0]
-            probs   = F.softmax(q_vals, dim=0)
-        return round(float(probs.max().item()), 4)
+        """Returns how much better the best action is vs PASS (Q-advantage)."""
+        q_vals = self.get_q_values(state)
+        best_action = max(q_vals, key=q_vals.get)
+        if best_action == "PASS":
+            return 0.0
+        return round(max(0.0, q_vals[best_action] - q_vals["PASS"]), 4)
 
     def save(self, version_tag: str) -> str:
         path = os.path.join(MODEL_DIR, f"{version_tag}.pt")

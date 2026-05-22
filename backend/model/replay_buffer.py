@@ -26,12 +26,12 @@ from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from backend.db import supabase
-from backend.model.features import STATE_DIM
+from backend.model.features import DQN_STATE_DIM
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 BATCH_SIZE       = 64
-MIN_BUFFER_SIZE  = 100
+MIN_BUFFER_SIZE  = 300
 MAX_BUFFER_SIZE  = 5000
 
 # ─── In-memory buffer (module-level, shared across calls) ─────────────────────
@@ -61,20 +61,46 @@ def load_from_db() -> int:
         print(f"  ⚠ Could not load replay buffer from DB: {e}")
         return 0
 
-    _memory = []
+    _memory  = []
+    skipped  = 0
+
     for r in rows:
         try:
+            raw = r["state"]
+            if isinstance(raw, str):
+                parsed = json.loads(raw)      # old string-encoded entries
+            elif isinstance(raw, list):
+                parsed = raw                  # new proper JSONB arrays
+            else:
+                skipped += 1
+                continue
+
+            state = np.array(parsed, dtype=np.float32)
+            if state.shape[0] != DQN_STATE_DIM:
+                skipped += 1
+                continue
+
+            next_s = None
+            if r["next_state"] is not None:
+                raw_ns = r["next_state"]
+                ns_parsed = json.loads(raw_ns) if isinstance(raw_ns, str) else raw_ns
+                ns = np.array(ns_parsed, dtype=np.float32)
+                next_s = ns if ns.shape[0] == DQN_STATE_DIM else None
+
             _memory.append({
-                "state":      np.array(json.loads(r["state"]),      dtype=np.float32),
+                "state":      state,
                 "action":     int(r["action"]),
                 "reward":     float(r["reward"]),
-                "next_state": np.array(json.loads(r["next_state"]), dtype=np.float32)
-                              if r["next_state"] else None,
+                "next_state": next_s,
                 "done":       bool(r["done"]),
             })
         except Exception:
+            skipped += 1
             continue
 
+    if skipped:
+        print(f"  ⚠ Skipped {skipped} stale transitions "
+              f"(wrong state dim — expected {DQN_STATE_DIM})")
     print(f"  Loaded {len(_memory)} transitions from DB into replay buffer")
     return len(_memory)
 
@@ -122,11 +148,11 @@ def flush_to_db(match_ids: list[int], episode_num: int, new_transitions: list[di
         match_id = match_ids[i] if i < len(match_ids) else None
         rows.append({
             "match_id":    match_id,
-            "state":       json.dumps([float(v) for v in t["state"]]),
+            "state":       [float(v) for v in t["state"]],           # was: json.dumps(...)
             "action":      int(t["action"]),
             "reward":      float(round(t["reward"], 6)),
-            "next_state":  json.dumps([float(v) for v in t["next_state"]])
-                           if t["next_state"] is not None else None,
+            "next_state":  [float(v) for v in t["next_state"]]        # was: json.dumps(...)
+                        if t["next_state"] is not None else None,
             "done":        bool(t["done"]),
             "episode_num": int(episode_num),
         })
@@ -155,13 +181,20 @@ def sample(batch_size: int = BATCH_SIZE) -> Optional[dict]:
 
     batch = random.sample(_memory, min(batch_size, len(_memory)))
 
-    states      = np.array([t["state"] for t in batch],      dtype=np.float32)
-    actions     = np.array([t["action"] for t in batch],     dtype=np.int64)
-    rewards     = np.array([t["reward"] for t in batch],     dtype=np.float32)
-    dones       = np.array([t["done"] for t in batch],       dtype=np.float32)
+    # Secondary guard: drop any in-memory transitions with wrong shape.
+    # Covers push_memory() calls that bypassed load_from_db() filtering.
+    valid = [t for t in batch if t["state"].shape[0] == DQN_STATE_DIM]
+    if len(valid) < max(8, batch_size // 4):
+        # Not enough clean transitions — skip this training step rather than crash.
+        return None
+
+    states      = np.array([t["state"] for t in valid],      dtype=np.float32)
+    actions     = np.array([t["action"] for t in valid],     dtype=np.int64)
+    rewards     = np.array([t["reward"] for t in valid],     dtype=np.float32)
+    dones       = np.array([t["done"] for t in valid],       dtype=np.float32)
     next_states = np.array([
-        t["next_state"] if t["next_state"] is not None else np.zeros(STATE_DIM)
-        for t in batch
+        t["next_state"] if t["next_state"] is not None else np.zeros(DQN_STATE_DIM)
+        for t in valid
     ], dtype=np.float32)
 
     return {
@@ -234,11 +267,11 @@ def push(
     try:
         supabase.table("rl_episodes").insert({
             "match_id":    match_id,
-            "state":       json.dumps([float(v) for v in state]),
+            "state":       [float(v) for v in state],                 # was: json.dumps(...)
             "action":      int(action),
             "reward":      float(round(reward, 6)),
-            "next_state":  json.dumps([float(v) for v in next_state])
-                           if next_state is not None else None,
+            "next_state":  [float(v) for v in next_state]             # was: json.dumps(...)
+                        if next_state is not None else None,
             "done":        bool(done),
             "episode_num": episode_num,
         }).execute()

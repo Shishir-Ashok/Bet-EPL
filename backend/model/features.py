@@ -52,7 +52,8 @@ ELO_MAX          = 1900.0
 XG_MAX           = 4.0
 GOALS_MAX        = 5.0
 STARTING_BALANCE = 100.0
-STATE_DIM        = 19
+XGB_STATE_DIM    = 16
+DQN_STATE_DIM    = 24
 
 POSITION_WEIGHTS = {"GK": 0.15, "DEF": 0.10, "MID": 0.10, "FWD": 0.12}
 DEFAULT_WEIGHT   = 0.10
@@ -96,37 +97,106 @@ def _paginate(query) -> list:
     return rows
 
 
+def _get_h2h(
+    results_by_team: dict,
+    home_team_id: int,
+    away_team_id: int,
+    before_time: str,
+    n: int = 6,
+) -> float:
+    """
+    Home team's win rate in last n head-to-head matches at home against this
+    specific away side. Returns 0.5 (neutral) if fewer than 2 H2H matches found.
+    """
+    # All matches where home_team_id was at home before this kickoff
+    home_entries = [
+        e for e in results_by_team.get(home_team_id, [])
+        if e[0] < before_time and e[2]   # is_home=True
+    ]
+    # Filter to only those where the opponent was away_team_id
+    # The results tuple is (kickoff_time, result, is_home, hg, ag, match_id)
+    # We need to cross-reference: find matches where away_team also appears as away
+    away_match_ids = {
+        e[5] for e in results_by_team.get(away_team_id, [])
+        if e[0] < before_time and not e[2]   # is_home=False
+    }
+
+    h2h = [e for e in home_entries if e[5] in away_match_ids][-n:]
+
+    if len(h2h) < 2:
+        return 0.5   # not enough data to be meaningful
+
+    wins = sum(1 for e in h2h if e[1] == "HOME")   # home team won
+    return round(wins / len(h2h), 4)
+
+
 # ─── Bulk data loader ─────────────────────────────────────────────────────────
 
-def bulk_fetch(match_ids: list) -> dict:
-    """Loads all data in 4 queries. Returns cache dict."""
-    print("  Bulk fetching training data (4 queries)...")
+def bulk_fetch(before_date: str = None) -> dict:
+    """
+    Loads all data in 4 queries. Returns cache dict.
 
-    # 1. ELO ratings
-    elo_rows = _paginate(
+    before_date : ISO string e.g. "2025-10-01".
+        When set, only ELO rows and match results with timestamps
+        before this date are loaded into the cache.
+
+        WHY THIS MATTERS:
+        build_feature_matrix() calls this once and passes the cache to
+        build_state_vector() for every training match. Without a date cap,
+        the cache contains the entire DB — including future 2025-26 results
+        that haven't been "simulated" yet. Even though per-match temporal
+        filters (e[0] < before_time) correctly block future entries from
+        appearing in individual feature vectors, XGBoost's training labels
+        for those future matches would still be present as rows in the
+        matches list passed to build_feature_matrix(). The before_date on
+        load_training_data() removes those future rows from the label set,
+        but the cache itself carrying future data creates distributional
+        leakage — the cache size, ELO spread, and form distributions all
+        reflect the full future season rather than what was known at the
+        training cutoff.
+
+        During live inference (simulate_historical_bets.py), before_date
+        is None. The per-match before_time filter handles isolation at the
+        feature level correctly in that context since we process one match
+        at a time.
+    """
+    import time
+
+    date_note = f" before {before_date}" if before_date else ""
+    print(f"  Bulk fetching training data (4 queries){date_note}...")
+
+    # 1. ELO ratings — capped to before_date if provided
+    elo_query = (
         supabase.table("elo_ratings")
         .select("team_id, match_id, elo, calculated_at")
         .order("calculated_at", desc=False)
     )
+    if before_date:
+        elo_query = elo_query.lt("calculated_at", before_date)
+
+    elo_rows = _paginate(elo_query)
     elo_by_team = defaultdict(list)
     for r in elo_rows:
         elo_by_team[r["team_id"]].append(
             (r["match_id"], float(r["elo"]), r["calculated_at"])
         )
 
-    # 2. Results — NOW includes match id in each tuple for xG lookup
-    result_rows = _paginate(
+    # 2. Results — capped to before_date if provided
+    result_query = (
         supabase.table("matches")
         .select("id, home_team_id, away_team_id, kickoff_time, result, home_goals, away_goals")
         .eq("status", "FINISHED")
         .not_.is_("result", "null")
         .order("kickoff_time", desc=False)
     )
+    if before_date:
+        result_query = result_query.lt("kickoff_time", before_date)
+
+    result_rows = _paginate(result_query)
     results_by_team = defaultdict(list)
     for r in result_rows:
-        kt = r["kickoff_time"]
+        kt  = r["kickoff_time"]
         mid = r["id"]
-        # Tuple now: (kickoff_time, result, is_home, home_goals, away_goals, match_id)
         results_by_team[r["home_team_id"]].append(
             (kt, r["result"], True,  r["home_goals"], r["away_goals"], mid)
         )
@@ -134,20 +204,32 @@ def bulk_fetch(match_ids: list) -> dict:
             (kt, r["result"], False, r["home_goals"], r["away_goals"], mid)
         )
 
-    # 3. Match stats for real xG
-    stats_rows = _paginate(
-        supabase.table("match_stats")
-        .select("match_id, home_xg, away_xg")
-    )
-    stats = {
-        r["match_id"]: {
-            "home_xg": float(r["home_xg"]) if r["home_xg"] is not None else None,
-            "away_xg": float(r["away_xg"]) if r["away_xg"] is not None else None,
-        }
-        for r in stats_rows
-    }
+    # 3. Match stats — filtered to match_ids already in the date-filtered results.
+    #    No separate date query needed: stats for future match_ids are unreachable
+    #    because those match_ids don't exist in result_rows.
+    if result_rows:
+        filtered_match_ids = [r["id"] for r in result_rows]
+        stats: dict = {}
+        for i in range(0, len(filtered_match_ids), 300):
+            chunk      = filtered_match_ids[i : i + 300]
+            chunk_rows = (
+                supabase.table("match_stats")
+                .select("match_id, home_xg, away_xg")
+                .in_("match_id", chunk)
+                .execute()
+                .data
+            )
+            for r in chunk_rows:
+                stats[r["match_id"]] = {
+                    "home_xg": float(r["home_xg"]) if r["home_xg"] is not None else None,
+                    "away_xg": float(r["away_xg"]) if r["away_xg"] is not None else None,
+                }
+            time.sleep(0.05)
+    else:
+        stats = {}
 
-    # 4. Injury impact per team (unchanged)
+    # 4. Injury impact per team (not date-filtered — injuries are current state,
+    #    used for live inference; during training they default to 0 anyway)
     inj_rows = _paginate(
         supabase.table("team_injuries")
         .select("team_id, status, players(position)")
@@ -196,18 +278,19 @@ def _get_form(
     team_id: int,
     n: int,
     before_time: str,
-    venue: str = "all",   # "all", "home", "away"
+    venue: str = "all",
 ) -> float:
     """
-    Returns PPG (0–1) for last n matches, optionally filtered by venue.
-    venue="home" → only home matches; venue="away" → only away matches.
+    Returns PPG (0-1) for last n matches, optionally filtered by venue.
+    Uses index access on tuples — safe regardless of tuple length.
+    Tuple layout: (kickoff_time[0], result[1], is_home[2], home_goals[3], away_goals[4], match_id[5])
     """
     all_entries = [e for e in results_by_team.get(team_id, []) if e[0] < before_time]
 
     if venue == "home":
-        filtered = [e for e in all_entries if e[2]]      # is_home = True
+        filtered = [e for e in all_entries if e[2]]       # is_home = True
     elif venue == "away":
-        filtered = [e for e in all_entries if not e[2]]  # is_home = False
+        filtered = [e for e in all_entries if not e[2]]   # is_home = False
     else:
         filtered = all_entries
 
@@ -216,7 +299,8 @@ def _get_form(
         return 0.5
 
     pts = 0
-    for _, result, is_home, _, _, _ in recent:
+    for e in recent:
+        result, is_home = e[1], e[2]
         if (result == "HOME" and is_home) or (result == "AWAY" and not is_home):
             pts += 3
         elif result == "DRAW":
@@ -230,7 +314,7 @@ def _get_xg_stats(
     team_id: int,
     n: int,
     before_time: str,
-    stats_cache: dict | None = None,    # NEW: pass cache["stats"] for real xG
+    stats_cache: dict | None = None,
 ) -> tuple[float, float]:
     """
     Returns (avg_xg_scored, avg_xg_conceded) for the last n matches.
@@ -242,139 +326,201 @@ def _get_xg_stats(
     The stats_cache is keyed by match_id → {"home_xg", "away_xg"}.
     We look up each match in the results list and check stats first.
     """
-    recent = [e for e in results_by_team.get(team_id, []) if e[0] < before_time][-n:]
-    s, c   = [], []
+    entries = [e for e in results_by_team.get(team_id, []) if e[0] < before_time][-n:]
+    if not entries:
+        return 0.3, 0.3
 
-    for kt, result, is_home, hg, ag, match_id in recent:
+    scored    = []
+    conceded  = []
+
+    for e in entries:
+        kt, result, is_home, hg, ag, mid = e
         # Try real xG first
-        real = (stats_cache or {}).get(match_id)
-        if real and real.get("home_xg") is not None and real.get("away_xg") is not None:
-            xg_s = float(real["home_xg"] if is_home else real["away_xg"])
-            xg_c = float(real["away_xg"] if is_home else real["home_xg"])
-        elif hg is not None and ag is not None:
-            # Goals fallback — consistent with the proxy used in scrape_stats
-            xg_s = float(hg if is_home else ag) * 0.30  # same conversion as scrape_stats
-            xg_c = float(ag if is_home else hg) * 0.30
+        if stats_cache and mid in stats_cache:
+            s = stats_cache[mid]
+            xg_scored   = s["home_xg"] if is_home else s["away_xg"]
+            xg_conceded = s["away_xg"] if is_home else s["home_xg"]
         else:
-            continue
+            # Fall back to goals
+            xg_scored   = float(hg) if hg is not None else None
+            xg_conceded = float(ag) if ag is not None else None
 
-        s.append(min(xg_s / XG_MAX, 1.0))
-        c.append(min(xg_c / XG_MAX, 1.0))
+        if xg_scored   is not None:
+            scored.append(min(xg_scored   / XG_MAX, 1.0))
+        if xg_conceded is not None:
+            conceded.append(min(xg_conceded / XG_MAX, 1.0))
 
-    avg_s = round(float(np.mean(s)), 4) if s else 0.3
-    avg_c = round(float(np.mean(c)), 4) if c else 0.3
-    return avg_s, avg_c
+    avg_scored   = round(float(np.mean(scored)),   4) if scored   else 0.3
+    avg_conceded = round(float(np.mean(conceded)), 4) if conceded else 0.3
+    return avg_scored, avg_conceded
 
 
-def _get_goals_avg(results_by_team: dict, team_id: int, n: int, before_time: str) -> float:
-    recent = [e for e in results_by_team.get(team_id, []) if e[0] < before_time][-n:]
-    goals  = [
-        min(float(hg if is_home else ag) / GOALS_MAX, 1.0)
-        for _, _, is_home, hg, ag in recent
-        if (hg if is_home else ag) is not None
-    ]
+def _get_goals_avg(
+    results_by_team: dict,
+    team_id: int,
+    n: int,
+    before_time: str,
+) -> float:
+    entries = [e for e in results_by_team.get(team_id, []) if e[0] < before_time][-n:]
+    goals = []
+    for e in entries:
+        kt, result, is_home, hg, ag, mid = e
+        g = hg if is_home else ag
+        if g is not None:
+            goals.append(min(float(g) / GOALS_MAX, 1.0))
     return round(float(np.mean(goals)), 4) if goals else 0.3
 
 
-def _norm_elo(elo: float) -> float:
-    return float(np.clip((elo - ELO_MIN) / (ELO_MAX - ELO_MIN), 0.0, 1.0))
-
-
-# ─── State vector ─────────────────────────────────────────────────────────────
+# ─── Public state vector builders ────────────────────────────────────────────
 
 def build_state_vector(
-    match_id:       int,
-    home_team_id:   int,
-    away_team_id:   int,
-    kickoff_time:   str,
-    wallet_balance: float,
-    before_date:    Optional[str] = None,
-    cache:          Optional[dict] = None,
+    home_team_id: int,
+    away_team_id: int,
+    kickoff_time: str,
+    before_date:  str  = None,
+    cache:        dict = None,
 ) -> np.ndarray:
     """
-    Returns a 19-dim state vector. Indices [16][17][18] are prob_home/draw/away
-    and are initialised to 0.0 here — the caller APPENDS XGBoost probs after
-    calling predict_probabilities(), it no longer overwrites existing indices.
+    Builds the 16-dim XGBoost feature vector for one match.
+
+    before_date: used as the temporal cutoff. Defaults to kickoff_time
+    so that only data prior to the match is used — no lookahead.
+
+    cache: if provided (from bulk_fetch), uses in-memory data.
+    If None, falls back to individual DB queries (live inference path).
     """
-    cutoff = before_date or kickoff_time
+    before = before_date or kickoff_time
 
     if cache:
-        sc = cache["stats"]  # stats_cache for real xG
-        home_elo_raw    = _get_elo(cache["elo"], home_team_id, cutoff)
-        away_elo_raw    = _get_elo(cache["elo"], away_team_id, cutoff)
-        home_form_5     = _get_form(cache["results"], home_team_id,  5, cutoff, "all")
-        away_form_5     = _get_form(cache["results"], away_team_id,  5, cutoff, "all")
-        home_form_home  = _get_form(cache["results"], home_team_id,  5, cutoff, "home")
-        away_form_away  = _get_form(cache["results"], away_team_id,  5, cutoff, "away")
-        home_xg_s, home_xg_c = _get_xg_stats(cache["results"], home_team_id, 5, cutoff, sc)
-        away_xg_s, away_xg_c = _get_xg_stats(cache["results"], away_team_id, 5, cutoff, sc)
-        home_goals      = _get_goals_avg(cache["results"], home_team_id, 5, cutoff)
-        away_goals      = _get_goals_avg(cache["results"], away_team_id, 5, cutoff)
-        injury_home     = cache["injuries"].get(home_team_id, 0.0)
-        injury_away     = cache["injuries"].get(away_team_id, 0.0)
-    else:
-        home_elo_raw    = _db_get_elo(home_team_id)
-        away_elo_raw    = _db_get_elo(away_team_id)
-        home_form_5     = _db_get_form(home_team_id,  5, cutoff, "all")
-        away_form_5     = _db_get_form(away_team_id,  5, cutoff, "all")
-        home_form_home  = _db_get_form(home_team_id,  5, cutoff, "home")
-        away_form_away  = _db_get_form(away_team_id,  5, cutoff, "away")
-        home_xg_s, home_xg_c = _db_get_xg(home_team_id, 5, cutoff)
-        away_xg_s, away_xg_c = _db_get_xg(away_team_id, 5, cutoff)
-        home_goals      = _db_get_goals(home_team_id, 5, cutoff)
-        away_goals      = _db_get_goals(away_team_id, 5, cutoff)
-        injury_home     = _db_injury_impact(home_team_id)
-        injury_away     = _db_injury_impact(away_team_id)
+        elo_data     = cache["elo"]
+        results_data = cache["results"]
+        stats_cache  = cache.get("stats")
+        injuries     = cache.get("injuries", {})
 
-    home_elo    = _norm_elo(home_elo_raw)
-    away_elo    = _norm_elo(away_elo_raw)
-    elo_diff    = float(np.clip(
+        home_elo_raw = _get_elo(elo_data, home_team_id, before)
+        away_elo_raw = _get_elo(elo_data, away_team_id, before)
+
+        home_form_5    = _get_form(results_data, home_team_id, 5,  before)
+        away_form_5    = _get_form(results_data, away_team_id, 5,  before)
+        home_form_home = _get_form(results_data, home_team_id, 10, before, venue="home")
+        away_form_away = _get_form(results_data, away_team_id, 10, before, venue="away")
+
+        home_xg_s, home_xg_c = _get_xg_stats(results_data, home_team_id, 5, before, stats_cache)
+        away_xg_s, away_xg_c = _get_xg_stats(results_data, away_team_id, 5, before, stats_cache)
+
+        home_goals = _get_goals_avg(results_data, home_team_id, 5, before)
+        away_goals = _get_goals_avg(results_data, away_team_id, 5, before)
+
+        h2h = _get_h2h(results_data, home_team_id, away_team_id, before)
+
+        injury_home = injuries.get(home_team_id, 0.0)
+        injury_away = injuries.get(away_team_id, 0.0)
+
+    else:
+        # Live inference fallback — individual DB queries
+        home_elo_raw = _db_get_elo(home_team_id)
+        away_elo_raw = _db_get_elo(away_team_id)
+
+        home_form_5    = _db_get_form(home_team_id, 5,  before)
+        away_form_5    = _db_get_form(away_team_id, 5,  before)
+        home_form_home = _db_get_form(home_team_id, 10, before, venue="home")
+        away_form_away = _db_get_form(away_team_id, 10, before, venue="away")
+
+        home_xg_s, home_xg_c = _db_get_xg(home_team_id, 5, before)
+        away_xg_s, away_xg_c = _db_get_xg(away_team_id, 5, before)
+
+        home_goals = _db_get_goals(home_team_id, 5, before)
+        away_goals = _db_get_goals(away_team_id, 5, before)
+
+        h2h = _db_get_h2h(home_team_id, away_team_id, before)
+
+        injury_home = _db_injury_impact(home_team_id)
+        injury_away = _db_injury_impact(away_team_id)
+
+    # Normalise ELO to 0-1 range
+    home_elo = float(np.clip((home_elo_raw - ELO_MIN) / (ELO_MAX - ELO_MIN), 0.0, 1.0))
+    away_elo = float(np.clip((away_elo_raw - ELO_MIN) / (ELO_MAX - ELO_MIN), 0.0, 1.0))
+    elo_diff = float(np.clip(
         (home_elo_raw - away_elo_raw) / (ELO_MAX - ELO_MIN), -1.0, 1.0
     ))
+
+    return np.array([
+        home_elo, away_elo, elo_diff,         # [0][1][2]
+        home_form_5, away_form_5,             # [3][4]
+        home_form_home, away_form_away,       # [5][6]
+        home_xg_s, away_xg_s,                # [7][8]
+        home_xg_c, away_xg_c,                # [9][10]
+        home_goals, away_goals,              # [11][12]
+        h2h,                                  # [13]
+        injury_home, injury_away,             # [14][15]
+    ], dtype=np.float32)
+
+
+def build_dqn_state(
+    xgb_vector:     np.ndarray,
+    xgb_probs:      dict,
+    implied_probs:  dict | None,
+    wallet_balance: float = STARTING_BALANCE,
+) -> np.ndarray:
+    """
+    Builds the 24-dim DQN state from the XGB vector plus value signals.
+    Call this AFTER build_state_vector() + predict_probabilities().
+
+    If implied_probs is None (no odds available), uses neutral 1/3 for each.
+    """
+    if implied_probs is None:
+        implied_probs = {"HOME": 0.333, "DRAW": 0.333, "AWAY": 0.333}
+
+    imp_h = float(implied_probs["HOME"])
+    imp_d = float(implied_probs["DRAW"])
+    imp_a = float(implied_probs["AWAY"])
+    xgb_h = float(xgb_probs["HOME"])
+    xgb_d = float(xgb_probs["DRAW"])
+    xgb_a = float(xgb_probs["AWAY"])
+    edge_home   = float(np.clip(xgb_h - imp_h, -0.5, 0.5))
     wallet_frac = float(np.clip(wallet_balance / STARTING_BALANCE, 0.0, 3.0))
 
     return np.array([
-        home_elo, away_elo, elo_diff,           # [0][1][2]
-        home_form_5, away_form_5,               # [3][4]
-        home_form_home, away_form_away,         # [5][6]  NEW — replaces form_10
-        home_xg_s, away_xg_s,                  # [7][8]
-        home_xg_c, away_xg_c,                  # [9][10]
-        home_goals, away_goals,                 # [11][12]
-        injury_home, injury_away,               # [13][14]
-        wallet_frac,                            # [15]
-        0.0, 0.0, 0.0,                          # [16][17][18] — XGB probs, filled by caller
+        *xgb_vector,                      # [0-15]
+        xgb_h, xgb_d, xgb_a,             # [16-18]
+        imp_h, imp_d, imp_a,              # [19-21]
+        edge_home,                        # [22]
+        wallet_frac,                      # [23]
     ], dtype=np.float32)
 
 
 # ─── Bulk matrix builder (XGBoost training) ───────────────────────────────────
 
-def build_feature_matrix(matches: list, wallet_balance: float = 10.0):
+def build_feature_matrix(matches: list, before_date: str = None):
     """
-    Builds the full feature matrix for all historical matches.
-    Calls bulk_fetch() once, then computes everything in memory.
+    Builds the XGBoost training matrix — 16 features, no wallet.
 
-    Returns (X, y, match_ids).
+    before_date : passed to bulk_fetch() so the cache only contains data
+        before this date. This closes the distributional leakage path where
+        the cache carried future ELO/form distributions even though per-match
+        temporal filters blocked individual future entries.
+
+        Set to the training cutoff date during monthly retrains.
+        None = no cap (correct for base training on completed seasons).
+
+    wallet_balance is intentionally not passed; XGBoost predicts match
+    outcomes, not betting decisions.
     """
     LABEL_MAP = {"HOME": 0, "DRAW": 1, "AWAY": 2}
-    cache     = bulk_fetch([m["id"] for m in matches])
+    cache     = bulk_fetch(before_date=before_date)   # ← THE KEY CHANGE
     X, y, ids = [], [], []
-    total     = len(matches)
 
-    print(f"  Computing {total} state vectors in-memory...")
+    print(f"  Computing {len(matches)} XGB feature vectors...")
     for i, m in enumerate(matches):
         if m.get("result") not in LABEL_MAP:
             continue
-        if (i + 1) % 200 == 0 or i == total - 1:
-            print(f"  {i+1}/{total}", end="\r")
         try:
             state = build_state_vector(
-                match_id       = m["id"],
-                home_team_id   = m["home_team_id"],
-                away_team_id   = m["away_team_id"],
-                kickoff_time   = m["kickoff_time"],
-                wallet_balance = wallet_balance,
-                before_date    = m["kickoff_time"],
-                cache          = cache,
+                home_team_id = m["home_team_id"],
+                away_team_id = m["away_team_id"],
+                kickoff_time = m["kickoff_time"],
+                before_date  = m["kickoff_time"],
+                cache        = cache,
             )
             X.append(state)
             y.append(LABEL_MAP[m["result"]])
@@ -382,11 +528,25 @@ def build_feature_matrix(matches: list, wallet_balance: float = 10.0):
         except Exception as e:
             print(f"\n  Warning: skipping match {m['id']}: {e}")
 
-    print(f"\n  Built {len(X)} feature vectors")
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int32), ids
 
 
 # ─── Slow-path DB fallbacks (inference only) ──────────────────────────────────
+
+def _db_get_h2h(home_team_id: int, away_team_id: int, before: str, n: int = 6) -> float:
+    rows = supabase.table("matches")\
+        .select("id, result")\
+        .eq("status", "FINISHED")\
+        .eq("home_team_id", home_team_id)\
+        .eq("away_team_id", away_team_id)\
+        .lt("kickoff_time", before)\
+        .order("kickoff_time", desc=True)\
+        .limit(n)\
+        .execute().data
+    if len(rows) < 2:
+        return 0.5
+    wins = sum(1 for r in rows if r["result"] == "HOME")
+    return round(wins / len(rows), 4)
 
 def _db_get_elo(team_id: int) -> float:
     r = supabase.table("elo_ratings").select("elo").eq("team_id", team_id)\

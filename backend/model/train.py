@@ -40,15 +40,16 @@ from typing import Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from backend.db import supabase
-from backend.model.features      import bulk_fetch, build_state_vector
+from backend.model.features      import bulk_fetch, build_state_vector, build_dqn_state
 from backend.model.xgboost_model import train as train_xgboost, load_model as load_xgb, predict_probabilities
 from backend.model.dqn_agent     import DQNAgent, _register_dqn
 from backend.model import replay_buffer
+from backend.engine.kelly import kelly_stake
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 from backend.data_pipeline.season_utils import (
-    get_historical_seasons, get_current_season, get_all_seasons
+    get_historical_seasons, get_current_season
 )
 
 def _get_train_val_seasons() -> tuple[list[str], str]:
@@ -106,47 +107,34 @@ def get_last_retrain_episode() -> int:
         return 0
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-def kelly_stake(prob: float, odds: float, balance: float, fraction: float = 0.25) -> float:
-    b = odds - 1.0
-    if b <= 0:
-        return 0.0
-    kelly = (prob * (b + 1) - 1) / b
-    return round(min(max(0.0, kelly * fraction * balance), balance * 0.2), 2)
+_FALLBACK_ODDS = {0: 2.35, 1: 3.45, 2: 3.60}
 
-
-def get_best_odds_for_action(match_id: int, action: int) -> Optional[float]:
+def get_best_odds_for_action(match_id: int, action: int) -> float:
+    """Returns stored odds for the given action, or historical PL average fallback."""
     if action == 3:
-        return None
+        return 1.0
     col = {0: "home_odds", 1: "draw_odds", 2: "away_odds"}[action]
     try:
         result = (
             supabase.table("odds")
             .select(col)
             .eq("match_id", match_id)
-            .order("fetched_at", desc=True)
-            .limit(10)
+            .limit(1)   # single row per match
             .execute()
         )
-        values = [float(r[col]) for r in result.data if r.get(col)]
-        return max(values) if values else None
+        if result.data and result.data[0].get(col):
+            return float(result.data[0][col])
     except Exception:
-        return None
+        pass
+    return _FALLBACK_ODDS[action]
 
 
 def compute_reward(action: int, result: str, stake: float, odds: float, balance: float):
-    """
-    Uses flat TRAINING_STAKE for the reward signal so the agent receives
-    a meaningful +1/-1 range regardless of Kelly sizing or odds source.
-    Balance is updated with the real Kelly stake for accurate wallet simulation.
-    """
     RESULT_MAP = {"HOME": 0, "DRAW": 1, "AWAY": 2}
     if action == 3:
         return 0.0, balance
-
-    won         = (action == RESULT_MAP.get(result))
-    train_pnl   = TRAINING_STAKE * (odds - 1.0) if won else -TRAINING_STAKE
-    reward      = float(np.clip(train_pnl, -2.0, 2.0))
-
+    won    = (action == RESULT_MAP.get(result))
+    reward = float(np.clip(odds - 1.0 if won else -1.0, -2.0, 2.0))
     real_pnl    = stake * (odds - 1.0) if won else -stake
     new_balance = round(max(0.0, balance + real_pnl), 2)
     return reward, new_balance
@@ -192,41 +180,86 @@ def load_matches(seasons: list[str], test: bool = False) -> list:
 
 # ─── State pre-computation ────────────────────────────────────────────────────
 
-def precompute_states(matches: list, xgb_model, feature_cache: dict) -> dict:
-    """Builds all state vectors from in-memory cache. Zero DB calls."""
-    print(f"\n  Building {len(matches)} state vectors from cache...")
-    cache = {}
+def precompute_states(
+    matches:       list,
+    xgb_model,
+    feature_cache: dict,
+    odds_cache:    dict | None = None,
+) -> dict:
+    """
+    Builds 23-dim DQN state vectors. Zero DB calls.
+    odds_cache is {match_id: implied_probs_dict} — None entries use neutral 1/3.
+    """
+    print(f"\n  Building {len(matches)} DQN state vectors from cache...")
+    states = {}
+
     for i, m in enumerate(matches):
         if (i + 1) % 200 == 0 or i == len(matches) - 1:
             print(f"  {i+1}/{len(matches)}", end="\r")
         try:
-            state = build_state_vector(
-                match_id       = m["id"],
-                home_team_id   = m["home_team_id"],
-                away_team_id   = m["away_team_id"],
-                kickoff_time   = m["kickoff_time"],
-                wallet_balance = STARTING_BALANCE,
-                before_date    = m["kickoff_time"],
-                cache          = feature_cache,
+            xgb_vec = build_state_vector(
+                home_team_id = m["home_team_id"],
+                away_team_id = m["away_team_id"],
+                kickoff_time = m["kickoff_time"],
+                before_date  = m["kickoff_time"],
+                cache        = feature_cache,
             )
             try:
-                p = predict_probabilities(xgb_model, state)
-                state[16] = float(p["HOME"])
-                state[17] = float(p["DRAW"])
-                state[18] = float(p["AWAY"])
+                probs = predict_probabilities(xgb_model, xgb_vec)
             except Exception:
-                pass
-            cache[m["id"]] = state
+                probs = {"HOME": 0.333, "DRAW": 0.333, "AWAY": 0.333}
+
+            implied = (odds_cache or {}).get(m["id"])
+
+            dqn_state = build_dqn_state(
+                xgb_vector    = xgb_vec,
+                xgb_probs     = probs,
+                implied_probs = implied,
+            )
+            states[m["id"]] = dqn_state
         except Exception as e:
             print(f"\n  Warning: skipping match {m['id']}: {e}")
-    print(f"\n  ✓ {len(cache)} state vectors ready\n")
-    return cache
+
+    print(f"\n  ✓ {len(states)} DQN state vectors ready\n")
+    return states
 
 
-def get_state(cache: dict, match_id: int, balance: float) -> np.ndarray:
-    state     = cache[match_id].copy()
-    state[15] = float(np.clip(balance / STARTING_BALANCE, 0.0, 3.0))
-    return state
+def preload_implied_odds(match_ids: list[int]) -> dict:
+    """
+    Fetches Pinnacle/Marathonbet odds for a list of match IDs and converts
+    them to de-vigged implied probabilities. Returns {match_id: implied_dict}.
+    Matches without odds get omitted — build_dqn_state handles None gracefully.
+    """
+    from backend.engine.kelly import remove_vig
+    try:
+        rows = (
+            supabase.table("odds")
+            .select("match_id, home_odds, draw_odds, away_odds")
+            .in_("match_id", match_ids)
+            .execute()
+            .data
+        )
+    except Exception as e:
+        print(f"  ⚠ Could not load odds for training: {e}")
+        return {}
+
+    result = {}
+    for r in rows:
+        try:
+            fair = remove_vig(r["home_odds"], r["draw_odds"], r["away_odds"])
+            result[r["match_id"]] = {
+                "HOME": fair["HOME"],
+                "DRAW": fair["DRAW"],
+                "AWAY": fair["AWAY"],
+            }
+        except Exception:
+            continue
+    print(f"  Loaded odds for {len(result)}/{len(match_ids)} matches")
+    return result
+
+
+def get_state(cache: dict, match_id: int) -> np.ndarray:
+    return cache[match_id].copy()
 
 
 # ─── Epoch ────────────────────────────────────────────────────────────────────
@@ -259,7 +292,9 @@ def run_epoch(
         if not result or match_id not in state_cache:
             continue
 
-        state = get_state(state_cache, match_id, balance)
+        state = get_state(state_cache, match_id)
+        state = state.copy()
+        state[23] = float(np.clip(balance / STARTING_BALANCE, 0.0, 3.0))
 
         if train:
             # Epsilon-greedy with confidence gate
@@ -285,16 +320,7 @@ def run_epoch(
                     action = 3
 
         odds = get_best_odds_for_action(match_id, action)
-        if odds is None:
-            probs = [state[16], state[17], state[18]]
-            p     = probs[action] if action < 3 else 1.0
-            odds  = round(1.0 / max(p, 0.05), 2)
-
-        stake = 0.0
-        if action < 3:
-            p     = [state[16], state[17], state[18]][action]
-            stake = kelly_stake(p, odds, balance)
-            stake = max(stake, MIN_BET) if stake > 0 else 0.0
+        stake = TRAINING_STAKE if action < 3 else 0.0
 
         reward, new_balance = compute_reward(action, result, stake, odds, balance)
 
@@ -302,11 +328,11 @@ def run_epoch(
             is_last    = (i == len(matches) - 1)
             done       = is_last or new_balance <= 0
             next_match = matches[i + 1] if not done else None
-            next_state = (
-                get_state(state_cache, next_match["id"], new_balance)
-                if next_match and next_match["id"] in state_cache
-                else None
-            )
+            if next_match and next_match["id"] in state_cache:
+                next_state = get_state(state_cache, next_match["id"]).copy()
+                next_state[23] = float(np.clip(new_balance / STARTING_BALANCE, 0.0, 3.0))
+            else:
+                next_state = None
 
             replay_buffer.push_memory(state, action, reward, next_state, done)
             transitions.append({"state": state, "action": action, "reward": reward,
@@ -346,39 +372,163 @@ def run_epoch(
         "new_match_ids":   match_ids,
     }
 
+# ─── Monthly Retain ─────────────────────────────────────────────────────────────
+
+def evaluate_and_decide_retrain() -> dict:
+    """
+    Looks at the last 60 days of bets and model metrics to decide
+    what (if anything) needs retraining this month.
+    
+    Returns a dict with:
+      retrain_xgb : bool
+      retrain_dqn : bool
+      reasons     : list[str]
+    """
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+
+    # ── 1. XGBoost calibration check ─────────────────────────────────────────
+    recent_preds = (
+        supabase.table("predictions")
+        .select("prob_home, prob_draw, prob_away, log_loss")
+        .gt("created_at", cutoff)
+        .not_.is_("log_loss", "null")
+        .execute()
+        .data
+    )
+    avg_log_loss = (
+        float(np.mean([r["log_loss"] for r in recent_preds]))
+        if recent_preds else None
+    )
+
+    # ── 2. DQN betting performance ────────────────────────────────────────────
+    recent_bets = (
+        supabase.table("bets")
+        .select("outcome, pnl, stake")
+        .gt("placed_at", cutoff)
+        .not_.is_("outcome", "null")
+        .execute()
+        .data
+    )
+    total_pnl  = sum(float(b["pnl"]) for b in recent_bets)
+    n_bets     = len(recent_bets)
+    win_rate   = (
+        sum(1 for b in recent_bets if b["outcome"] == "WIN") / n_bets
+        if n_bets else None
+    )
+    roi = (
+        total_pnl / sum(float(b["stake"]) for b in recent_bets if b["stake"])
+        if n_bets else None
+    )
+
+    reasons       = []
+    retrain_xgb   = False
+    retrain_dqn   = False
+
+    # XGBoost: retrain if log-loss is above 1.05 (degraded calibration)
+    if avg_log_loss is not None and avg_log_loss > 1.05:
+        retrain_xgb = True
+        reasons.append(f"XGBoost log-loss degraded: {avg_log_loss:.4f} > 1.05")
+
+    # DQN: retrain if ROI is negative over 60 days of live betting
+    if roi is not None and n_bets >= 10 and roi < -0.05:
+        retrain_dqn = True
+        reasons.append(f"DQN ROI: {roi:.1%} over {n_bets} bets — below threshold")
+
+    # DQN: also retrain if win rate is well below expected (< 40% with >15 bets)
+    if win_rate is not None and n_bets >= 15 and win_rate < 0.40:
+        retrain_dqn = True
+        reasons.append(f"DQN win rate: {win_rate:.1%} < 40% over {n_bets} bets")
+
+    print(f"\n  Monthly retrain evaluation:")
+    print(f"  XGBoost log-loss (60d): {avg_log_loss:.4f}" if avg_log_loss else "  No prediction data")
+    print(f"  DQN  ROI (60d):  {roi:.1%} | Win rate: {win_rate:.1%} | Bets: {n_bets}" if roi else "  No bet data")
+    for r in reasons:
+        print(f"  → {r}")
+    if not reasons:
+        print("  → Both models healthy — no retrain needed")
+
+    return {
+        "retrain_xgb": retrain_xgb,
+        "retrain_dqn": retrain_dqn,
+        "avg_log_loss": avg_log_loss,
+        "roi": roi,
+        "win_rate": win_rate,
+        "n_bets": n_bets,
+        "reasons": reasons,
+    }
 
 # ─── Entry points ─────────────────────────────────────────────────────────────
 
-def train_xgboost_only(test: bool = False, recent_only: bool = False):
+def train_xgboost_only(
+    test:                   bool = False,
+    recent_only:            bool = False,
+    include_current_season: bool = False,
+    before_date:            str  = None,      # ← NEW: caps training cutoff date
+):
     """
     Trains XGBoost on historical data.
-
-    recent_only=True: trains on the last 2 completed seasons only.
-    Useful for a faster mid-season retrain that emphasises recent patterns.
-    Full retrain (recent_only=False) is recommended at season start.
+ 
+    Parameters
+    ----------
+    recent_only             : train on last 2 completed seasons only (mid-season).
+    include_current_season  : include current season's finished matches.
+    before_date             : ISO date string e.g. "2025-10-01".
+                              Only matches with kickoff_time < before_date
+                              are included. Used by monthly simulation retrains
+                              to prevent future match outcomes leaking into
+                              training data. None = no date cap (default,
+                              correct for live/production retrains).
     """
     print("\n" + "=" * 55)
     print("  XGBoost outcome predictor")
+ 
     if recent_only:
         completed = get_historical_seasons(from_year=2020)
-        # Take last 2 completed seasons as training data
-        seasons = [s["label"] for s in completed[-2:]]
+        seasons   = [s["label"] for s in completed[-2:]]
         print(f"  Mode: recent-only ({', '.join(seasons)})")
+    elif include_current_season:
+        seasons = TRAIN_SEASONS + [CURRENT_SEASON]
+        # Deduplicate (CURRENT_SEASON may already be in TRAIN_SEASONS)
+        seasons = list(dict.fromkeys(seasons))
+        print(f"  Mode: include current season ({', '.join(seasons)})")
     else:
         seasons = TRAIN_SEASONS
-        print(f"  Mode: full ({', '.join(seasons)})")
+        print(f"  Mode: full base ({', '.join(seasons)})")
+ 
+    if before_date:
+        print(f"  Date cap: before {before_date}")
     if test:
         print("  *** TEST MODE — 100 samples ***")
     print("=" * 55)
-
+ 
     version_tag    = f"xgb_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     model, metrics = train_xgboost(
         seasons     = seasons,
         version_tag = version_tag,
         limit       = 100 if test else None,
+        before_date = before_date,            # ← passed through to load_training_data
     )
     print(f"\n✓ XGBoost done. Log-loss: {metrics['val_log_loss']}  Version: {version_tag}")
     return model
+
+
+def monthly_retrain(epochs: int = DQN_EPOCHS):
+    decision = evaluate_and_decide_retrain()
+
+    if not decision["retrain_xgb"] and not decision["retrain_dqn"]:
+        print("\n  Both models healthy — skipping monthly retrain.")
+        return decision
+
+    if decision["retrain_xgb"]:
+        train_xgboost_only(include_current_season=True)  # every game, all seasons
+
+    if decision["retrain_dqn"]:
+        train_dqn_only(epochs=epochs, incremental=True, warm_start=True)
+
+    return decision
+
+
 
 
 def train_dqn_only(
@@ -433,9 +583,12 @@ def train_dqn_only(
         print(f"  Train: {len(train_matches)} | Val: {len(val_matches)}")
 
     all_matches   = train_matches + val_matches
-    feature_cache = bulk_fetch([m["id"] for m in all_matches])
-    train_cache   = precompute_states(train_matches, xgb_model, feature_cache)
-    val_cache     = precompute_states(val_matches, xgb_model, feature_cache)
+    feature_cache = bulk_fetch()
+    all_ids   = [m["id"] for m in all_matches]
+    odds_cache = preload_implied_odds(all_ids)
+
+    train_cache = precompute_states(train_matches, xgb_model, feature_cache, odds_cache)
+    val_cache   = precompute_states(val_matches,   xgb_model, feature_cache, odds_cache)
 
     if clear_buffer:
         print("  Clearing replay buffer from DB...")
@@ -549,7 +702,7 @@ def train_full(epochs: int = DQN_EPOCHS, test: bool = False, clear_buffer: bool 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train the PL betting bot models")
-    parser.add_argument("--mode",          choices=["full", "xgboost", "dqn"], default="full")
+    parser.add_argument("--mode",          choices=["full", "xgboost", "dqn", "monthly"], default="full")
     parser.add_argument("--epochs",        type=int, default=DQN_EPOCHS)
     parser.add_argument("--test",          action="store_true")
     parser.add_argument("--clear-buffer",  action="store_true")
@@ -559,10 +712,22 @@ if __name__ == "__main__":
                         help="DQN: continue from existing checkpoint instead of fresh init")
     parser.add_argument("--recent-only",   action="store_true",
                         help="XGBoost: train on last 2 seasons only (faster mid-season retrain)")
+    parser.add_argument("--include-current-season", action="store_true",
+                    dest="include_current_season",
+                    help="XGBoost: include current season finished matches in training")
+    parser.add_argument("--before-date", default=None,
+                        dest="before_date",
+                        help="Cap training to matches before this date e.g. 2025-10-01. "
+                        "Used for honest monthly simulation retrains.")
     args = parser.parse_args()
 
     if args.mode == "full":
-        train_xgboost_only(test=args.test, recent_only=args.recent_only)
+        train_xgboost_only(
+            test=args.test,
+            recent_only=args.recent_only,
+            include_current_season=args.include_current_season,
+            before_date=args.before_date,
+        )
         train_dqn_only(
             epochs=args.epochs, test=args.test,
             clear_buffer=args.clear_buffer,
@@ -570,7 +735,13 @@ if __name__ == "__main__":
             warm_start=args.warm_start,
         )
     elif args.mode == "xgboost":
-        train_xgboost_only(test=args.test, recent_only=args.recent_only)
+        train_xgboost_only(
+            test=args.test,
+            recent_only=args.recent_only,
+            include_current_season=args.include_current_season,
+            before_date=args.before_date,
+        )
+
     elif args.mode == "dqn":
         train_dqn_only(
             epochs=args.epochs, test=args.test,
@@ -578,3 +749,6 @@ if __name__ == "__main__":
             incremental=args.incremental,
             warm_start=args.warm_start,
         )
+    elif args.mode == "monthly":
+        monthly_retrain(epochs=args.epochs)
+        

@@ -128,7 +128,6 @@ def kelly_stake(
     fractional = full_kelly * KELLY_FRACTION
     capped     = min(fractional, MAX_BET_FRACTION)
     stake      = round(capped * balance, 2)
-    stake      = max(stake, 0.10)   # minimum €0.10 bet
 
     return {
         "stake":      stake,

@@ -4,14 +4,18 @@ backend/model/xgboost_model.py
 XGBoost multi-class classifier: given a match's 16-feature state vector,
 predicts the probability of HOME win, DRAW, or AWAY win.
 
-Why XGBoost as the first layer?
-  - Gradient-boosted trees generalise well on small tabular datasets
-  - Gives well-calibrated probability outputs the DQN uses as input
-  - Faster to train and easier to interpret than a neural net
-  - Handles missing features gracefully
+Fix: before_date now flows all the way through:
+  train(before_date)
+    → load_training_data(before_date)
+      → build_feature_matrix(matches, before_date)   ← WAS MISSING
+        → bulk_fetch(before_date)                     ← WAS MISSING
 
-The DQN takes these probabilities + other context as its state
-and learns WHEN to act on them.
+Without passing before_date into build_feature_matrix, load_training_data
+correctly filtered which matches became training LABELS, but the cache fed
+into feature computation still contained the full future dataset. This caused
+distributional leakage — XGBoost implicitly learned from future ELO spreads
+and form distributions even though individual future match entries were
+blocked by the per-match temporal filter.
 """
 
 import os
@@ -28,7 +32,7 @@ from sklearn.metrics import log_loss, accuracy_score
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from backend.db import supabase
-from backend.model.features import build_feature_matrix, STATE_DIM
+from backend.model.features import build_feature_matrix
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -36,22 +40,22 @@ MODEL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "checkpoints
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 XGB_PARAMS = {
-    "objective":            "multi:softprob",
-    "num_class":            3,
-    "n_estimators":         300,
-    "max_depth":            4,
-    "learning_rate":        0.05,
-    "subsample":            0.8,
-    "colsample_bytree":     0.8,
-    "min_child_weight":     5,
-    "gamma":                0.1,
-    "reg_alpha":            0.1,
-    "reg_lambda":           1.0,
-    "eval_metric":          "mlogloss",
-    "tree_method":          "hist",
-    "device":               "cuda",
-    "random_state":         42,
-    "verbosity":            1,
+    "objective":             "multi:softprob",
+    "num_class":             3,
+    "n_estimators":          300,
+    "max_depth":             4,
+    "learning_rate":         0.05,
+    "subsample":             0.8,
+    "colsample_bytree":      0.8,
+    "min_child_weight":      5,
+    "gamma":                 0.1,
+    "reg_alpha":             0.1,
+    "reg_lambda":            1.0,
+    "eval_metric":           "mlogloss",
+    "tree_method":           "hist",
+    "device":                "cuda",
+    "random_state":          42,
+    "verbosity":             1,
     "early_stopping_rounds": 30,
 }
 
@@ -60,8 +64,6 @@ LABEL_MAP_R = {"HOME": 0, "DRAW": 1, "AWAY": 2}
 
 
 # ─── Calibrated model wrapper ─────────────────────────────────────────────────
-# IMPORTANT: must be at module level — pickle cannot serialise locally-defined
-# (nested) classes. Defining this inside train() caused the AttributeError.
 
 class CalibratedModel:
     """
@@ -74,10 +76,6 @@ class CalibratedModel:
         self.calibrators = calibrators
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        # XGBoost trained on CUDA, input arrives on CPU — use numpy directly
-        # to avoid the device-mismatch warning from DMatrix conversion.
-        # predict_proba on a fitted XGBClassifier handles this transparently
-        # when we pass a plain numpy array.
         raw = self.base.predict_proba(X)
         cal = np.stack(
             [iso.predict(raw[:, i]) for i, iso in enumerate(self.calibrators)],
@@ -87,26 +85,32 @@ class CalibratedModel:
 
     @property
     def estimator(self) -> xgb.XGBClassifier:
-        """Exposes base estimator for feature_importances_."""
         return self.base
 
 
 # ─── Training ─────────────────────────────────────────────────────────────────
 
 def load_training_data(
-    seasons: Optional[list[str]] = None,
-    limit:   Optional[int] = None,
+    seasons:     Optional[list[str]] = None,
+    limit:       Optional[int]       = None,
+    before_date: Optional[str]       = None,
 ) -> tuple:
     """
     Loads finished historical matches and builds the feature matrix.
 
     Parameters
     ----------
-    seasons : filter to specific seasons. None = all seasons.
-    limit   : cap number of matches (use limit=100 for test runs).
-              None = load everything (uses explicit limit=10000 to bypass
-              Supabase's silent 1000-row default page size).
+    seasons     : filter to specific seasons. None = all seasons.
+    limit       : cap rows (use 100 for test runs).
+    before_date : ISO date string e.g. "2025-10-01".
+                  Caps BOTH which matches become training labels AND
+                  the data loaded into the feature cache via
+                  build_feature_matrix(before_date=before_date).
+                  Prevents future match outcomes leaking into either
+                  labels or feature distributions.
     """
+    import time
+
     query = (
         supabase.table("matches")
         .select("id, home_team_id, away_team_id, kickoff_time, result, season")
@@ -118,15 +122,16 @@ def load_training_data(
     if seasons:
         query = query.in_("season", seasons)
 
+    if before_date:
+        query = query.lt("kickoff_time", before_date)
+
     if limit:
         query   = query.limit(limit)
         matches = query.execute().data
     else:
-        # Supabase Python client v2 caps .limit() at 1000 rows internally.
-        # Use .range() with explicit offsets to page through all results.
-        matches = []
+        matches   = []
         page_size = 1000
-        offset = 0
+        offset    = 0
         while True:
             for attempt in range(3):
                 try:
@@ -135,24 +140,30 @@ def load_training_data(
                 except Exception as e:
                     if attempt == 2:
                         raise
-                    import time; time.sleep(2 ** attempt)
+                    time.sleep(2 ** attempt)
             if not page:
                 break
             matches.extend(page)
             if len(page) < page_size:
                 break
             offset += page_size
-            import time; time.sleep(0.2)
+            time.sleep(0.2)
 
     if not matches:
         raise ValueError(
             "No finished matches in DB. Run seed_historical_data.py first."
         )
 
-    print(f"  Loaded {len(matches)} finished matches")
+    date_note = f" (before {before_date})" if before_date else ""
+    print(f"  Loaded {len(matches)} finished matches{date_note}")
     print(f"  Seasons: {sorted(set(m['season'] for m in matches))}")
 
-    X, y, ids = build_feature_matrix(matches)
+    # THE KEY FIX: pass before_date into build_feature_matrix so the cache
+    # loaded by bulk_fetch() is also date-capped. Previously before_date
+    # filtered the label rows but bulk_fetch() inside build_feature_matrix
+    # still loaded the entire DB into the feature cache.
+    X, y, ids = build_feature_matrix(matches, before_date=before_date)
+
     print(f"  Feature matrix: {X.shape}")
     print(f"  Classes — HOME: {sum(y==0)}, DRAW: {sum(y==1)}, AWAY: {sum(y==2)}")
 
@@ -161,22 +172,22 @@ def load_training_data(
 
 def train(
     seasons:     Optional[list[str]] = None,
-    version_tag: Optional[str] = None,
-    val_split:   float = 0.15,
-    limit:       Optional[int] = None,
+    version_tag: Optional[str]       = None,
+    val_split:   float               = 0.15,
+    limit:       Optional[int]       = None,
+    before_date: Optional[str]       = None,
 ) -> tuple:
     """
     Trains the XGBoost model on historical match data.
 
-    Uses a chronological train/val split — validates on the most recent
-    matches to replicate real deployment conditions.
-
     Parameters
     ----------
-    limit : 100 for a quick test run, None for full training.
+    before_date : passed through to load_training_data and then into
+                  build_feature_matrix so both labels and features are
+                  capped to data before this date.
     """
     print("\n[XGBoost] Loading training data...")
-    X, y, ids = load_training_data(seasons, limit=limit)
+    X, y, ids = load_training_data(seasons, limit=limit, before_date=before_date)
 
     if len(X) < 50:
         raise ValueError(f"Only {len(X)} samples — need at least 50.")
@@ -186,7 +197,6 @@ def train(
     y_train, y_val = y[:split_idx], y[split_idx:]
     print(f"\n  Train: {len(X_train)}, Val: {len(X_val)}")
 
-    # Detect GPU — fall back to CPU gracefully
     params = XGB_PARAMS.copy()
     try:
         import subprocess
@@ -201,9 +211,8 @@ def train(
     model = xgb.XGBClassifier(**params)
     model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=50)
 
-    # Per-class isotonic calibration on the validation set
     print("\n[XGBoost] Calibrating probabilities...")
-    raw_val   = model.predict_proba(X_val)
+    raw_val     = model.predict_proba(X_val)
     calibrators = []
     cal_probs   = np.zeros_like(raw_val)
 
@@ -213,12 +222,9 @@ def train(
         cal_probs[:, cls] = iso.predict(raw_val[:, cls])
         calibrators.append(iso)
 
-    cal_probs = cal_probs / np.maximum(cal_probs.sum(axis=1, keepdims=True), 1e-8)
-
-    # Use the module-level class so pickle works
+    cal_probs  = cal_probs / np.maximum(cal_probs.sum(axis=1, keepdims=True), 1e-8)
     calibrated = CalibratedModel(model, calibrators)
 
-    # Metrics
     val_preds   = np.argmax(cal_probs, axis=1)
     val_logloss = log_loss(y_val, cal_probs)
     val_acc     = accuracy_score(y_val, val_preds)
@@ -256,7 +262,7 @@ def load_model(version_tag: Optional[str] = None) -> CalibratedModel:
     from backend.model.model_store import ensure_local
 
     if version_tag:
-        local_path = os.path.join(MODEL_DIR, f"{version_tag}.pkl")
+        local_path   = os.path.join(MODEL_DIR, f"{version_tag}.pkl")
         storage_path = f"checkpoints/{version_tag}.pkl"
     else:
         result = (
@@ -277,7 +283,6 @@ def load_model(version_tag: Optional[str] = None) -> CalibratedModel:
         filename     = storage_path.split("/")[-1]
         local_path   = os.path.join(MODEL_DIR, filename)
 
-    # ensure_local downloads from Storage if not on disk (handles Render restarts)
     local_path = ensure_local(storage_path, local_path)
 
     with open(local_path, "rb") as f:
@@ -285,7 +290,6 @@ def load_model(version_tag: Optional[str] = None) -> CalibratedModel:
 
 
 def predict_probabilities(model: CalibratedModel, state_vector: np.ndarray) -> dict:
-    """Returns HOME/DRAW/AWAY probabilities for a single 16-dim state vector."""
     probs = model.predict_proba(state_vector.reshape(1, -1))[0]
     return {
         "HOME": round(float(probs[0]), 4),
@@ -298,13 +302,12 @@ def get_feature_importance(model: CalibratedModel) -> list[dict]:
     FEATURE_NAMES = [
         "home_elo", "away_elo", "elo_diff",
         "home_form_5", "away_form_5",
-        "home_form_home", "away_form_away",   # [5][6] — venue split
+        "home_form_5_home", "away_form_5_away",
         "home_xg_scored", "away_xg_scored",
         "home_xg_conceded", "away_xg_conceded",
         "home_goals_avg", "away_goals_avg",
+        "h2h_home_winrate",
         "injury_home", "injury_away",
-        "wallet_fraction",
-        "prob_home", "prob_draw", "prob_away",  # [16][17][18]
     ]
     base = getattr(model, "estimator", model)
     if hasattr(base, "feature_importances_"):
@@ -321,7 +324,6 @@ def get_feature_importance(model: CalibratedModel) -> list[dict]:
 def _register_model(version_tag, metrics, local_save_path, training_games):
     from backend.model.model_store import upload
 
-    # Upload to Supabase Storage so Render can find it after restarts
     storage_path = upload(local_save_path)
 
     supabase.table("model_versions").update(
@@ -338,4 +340,4 @@ def _register_model(version_tag, metrics, local_save_path, training_games):
         "notes":          json.dumps(metrics),
     }).execute()
 
-    print(f"  Registered: {version_tag} (is_active=True, stored in Supabase Storage)")
+    print(f"  Registered: {version_tag} (is_active=True)")

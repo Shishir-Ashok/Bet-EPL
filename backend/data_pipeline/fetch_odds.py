@@ -29,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from backend.db import supabase
+from backend.data_pipeline.odds_validator import validate_odds_row
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -115,32 +116,49 @@ def match_event_to_db_match(event: dict) -> int | None:
     return None
 
 
-def extract_h2h_odds(bookmaker: dict) -> tuple[float, float, float] | None:
+def extract_h2h_odds(
+    bookmaker:  dict,
+    home_team:  str,   # event["home_team"] — the actual home side
+    away_team:  str,   # event["away_team"]
+) -> tuple[float, float, float] | None:
     """
-    Pulls home/draw/away decimal odds from a bookmaker's h2h market.
-    Returns None if the market data is malformed.
+    Pulls home/draw/away odds matched by team name, not by list position.
+
+    The Odds API does not guarantee outcome ordering. We match each
+    outcome name against the known home/away team strings using the
+    same fuzzy logic as match_event_to_db_match().
+
+    Returns (home_odds, draw_odds, away_odds) or None.
     """
     for market in bookmaker.get("markets", []):
         if market.get("key") != "h2h":
             continue
-        outcomes = {o["name"]: o["price"] for o in market.get("outcomes", [])}
-        if len(outcomes) == 3:
-            # h2h has: home team name, away team name, "Draw"
-            prices = list(outcomes.values())
-            # Identify which is Draw, which is home, which is away
-            draw_price = outcomes.get("Draw")
-            if not draw_price:
-                return None
-            team_prices = [v for k, v in outcomes.items() if k != "Draw"]
-            if len(team_prices) != 2:
-                return None
-            # The API orders outcomes: home team first, away team second
-            outcome_list = [o for o in market["outcomes"] if o["name"] != "Draw"]
-            if len(outcome_list) != 2:
-                return None
-            home_price = outcome_list[0]["price"]
-            away_price = outcome_list[1]["price"]
-            return home_price, draw_price, away_price
+
+        outcomes = market.get("outcomes", [])
+        if len(outcomes) != 3:
+            return None
+
+        draw_odds = None
+        home_odds = None
+        away_odds = None
+
+        home_lower = home_team.lower()
+        away_lower = away_team.lower()
+
+        for o in outcomes:
+            name  = o["name"].lower()
+            price = o["price"]
+
+            if name == "draw":
+                draw_odds = price
+            elif name in home_lower or home_lower in name:
+                home_odds = price
+            elif name in away_lower or away_lower in name:
+                away_odds = price
+
+        if home_odds and draw_odds and away_odds:
+            return home_odds, draw_odds, away_odds
+
     return None
 
 
@@ -163,61 +181,113 @@ def fetch_upcoming_odds() -> list[dict]:
     return response.json()
 
 
+ODDS_CHANGE_THRESHOLD = 0.02  # only update DB if any line moved by more than this
+
 def upsert_odds(events: list[dict]) -> tuple[int, int]:
     """
-    For each event, find the matching DB match and upsert a single odds row
-    using Pinnacle as the primary source, falling back to Marathonbet.
+    For each event:
+      1. Match to a DB match record
+      2. Extract Pinnacle (primary) or Marathonbet (fallback) odds
+      3. Check if existing odds already match — skip DB write if unchanged
+      4. Upsert (single row per match) if new or changed
 
-    One row per match — upsert on match_id so re-runs are safe.
     Returns (events_matched, odds_rows_upserted).
     """
-    events_matched  = 0
-    odds_upserted   = 0
+    events_matched = 0
+    odds_upserted  = 0
+
+    # Fetch all existing odds rows for upcoming matches in one query
+    # so we can compare without per-match DB calls
+    existing_odds: dict[int, dict] = {}
+    try:
+        rows = (
+            supabase.table("odds")
+            .select("match_id, home_odds, draw_odds, away_odds")
+            .execute()
+            .data
+        )
+        existing_odds = {r["match_id"]: r for r in rows}
+    except Exception as e:
+        print(f"  ⚠ Could not prefetch existing odds: {e}")
 
     for event in events:
         match_id = match_event_to_db_match(event)
         if not match_id:
-            print(f"  ⚠ No DB match for: {event.get('home_team')} vs {event.get('away_team')} ({event.get('commence_time')})")
+            print(f"  ⚠ No DB match for: {event.get('home_team')} vs "
+                  f"{event.get('away_team')} ({event.get('commence_time')})")
             continue
 
         events_matched += 1
-
-        # Index bookmakers by key for O(1) lookup
-        bookmakers = {bk["key"]: bk for bk in event.get("bookmakers", [])}
-
-        selected_odds = None
-        selected_name = None
+        bookmakers      = {bk["key"]: bk for bk in event.get("bookmakers", [])}
+        selected_odds   = None
+        selected_name   = None
 
         for bk_key in (PRIMARY_BOOKMAKER, FALLBACK_BOOKMAKER):
             bk = bookmakers.get(bk_key)
             if bk:
-                h2h = extract_h2h_odds(bk)
+                h2h = extract_h2h_odds(bk, event["home_team"], event["away_team"])
                 if h2h:
                     selected_odds = h2h
                     selected_name = bk_key
                     break
 
         if not selected_odds:
-            print(f"  ⚠ Neither Pinnacle nor Marathonbet available for: "
-                  f"{event.get('home_team')} vs {event.get('away_team')}")
+            print(f"  ⚠ No usable odds for: {event.get('home_team')} vs "
+                  f"{event.get('away_team')}")
             continue
 
-        home_odds, draw_odds, away_odds = selected_odds
+        new_home, new_draw, new_away = selected_odds
+
+        # Compare against stored odds — skip write if nothing meaningful changed
+        existing = existing_odds.get(match_id)
+        if existing:
+            moved = (
+                abs(float(existing["home_odds"]) - new_home) > ODDS_CHANGE_THRESHOLD or
+                abs(float(existing["draw_odds"]) - new_draw) > ODDS_CHANGE_THRESHOLD or
+                abs(float(existing["away_odds"]) - new_away) > ODDS_CHANGE_THRESHOLD
+            )
+            if not moved:
+                print(f"  – {event['home_team']} vs {event['away_team']}: "
+                      f"odds unchanged, skipping")
+                continue
+        
+        match = (
+            supabase.table("matches")
+            .select("home_team_id, away_team_id")
+            .eq("id", match_id)
+            .single()
+            .execute()
+            .data
+        )
+        if not match:
+            continue
+
+        validated = validate_odds_row(
+            home_team_id = match["home_team_id"],
+            away_team_id = match["away_team_id"],
+            home_odds    = new_home,
+            draw_odds    = new_draw,
+            away_odds    = new_away,
+        )
+        if validated is None:
+            print(f"  ✗ Odds rejected for match {match_id} — implausible values")
+            continue
 
         supabase.table("odds").upsert(
             {
-                "match_id":  match_id,
-                "bookmaker": selected_name,
-                "home_odds": home_odds,
-                "draw_odds": draw_odds,
-                "away_odds": away_odds,
-            },
+                "match_id":   match_id,
+                "home_odds":  validated["home_odds"],
+                "draw_odds":  validated["draw_odds"],
+                "away_odds":  validated["away_odds"],
+                "bookmaker":  selected_name,
+            }, 
             on_conflict="match_id"
         ).execute()
 
         odds_upserted += 1
+        status = "updated" if existing else "inserted"
         print(f"  ✓ {event['home_team']} vs {event['away_team']}: "
-              f"{selected_name} — {home_odds} / {draw_odds} / {away_odds}")
+              f"{selected_name} {new_home}/{new_draw}/{new_away} ({status})")
 
     return events_matched, odds_upserted
 

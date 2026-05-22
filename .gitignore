@@ -83,3 +83,8 @@ logs/
 *.tmp
 *.bak
 scratch/
+
+# ─── Model Checkpoints ───────────────────────────────────────────────────────
+backend/model/checkpoints/
+
+tree.txt

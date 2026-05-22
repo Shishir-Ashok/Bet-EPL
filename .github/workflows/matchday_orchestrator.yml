@@ -105,12 +105,25 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
         run: python -m backend.data_pipeline.scrape_injuries
 
-      - name: Wake Render service
-        if: steps.fixture_check.outputs.has_fixtures == 'true'
+      - name: Wake and confirm Render service is ready
         run: |
-          echo "Waking Render service..."
-          curl -s --max-time 90 "${{ secrets.RENDER_SERVICE_URL }}/health" || true
-          sleep 10
+          echo "Warming up Render service..."
+          MAX_ATTEMPTS=12      # 12 x 15s = 3 minutes max wait
+          ATTEMPT=0
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time 15 \
+              "${{ secrets.RENDER_SERVICE_URL }}/health")
+            echo "Attempt $((ATTEMPT+1)): HTTP $STATUS"
+            if [ "$STATUS" = "200" ]; then
+              echo "Service is ready."
+              exit 0
+            fi
+            ATTEMPT=$((ATTEMPT+1))
+            sleep 15
+          done
+          echo "ERROR: Render service did not become ready after 3 minutes."
+          exit 1   # fail loudly rather than calling downstream endpoints on a sleeping service
 
       - name: Generate predictions
         if: steps.fixture_check.outputs.has_fixtures == 'true'
