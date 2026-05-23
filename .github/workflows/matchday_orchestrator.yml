@@ -35,7 +35,7 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Check for upcoming fixtures
         id: fixture_check
@@ -109,21 +109,21 @@ jobs:
       - name: Wake and confirm Render service is ready
         run: |
           echo "Warming up Render service..."
-          MAX_ATTEMPTS=12      # 12 x 15s = 3 minutes max wait
+          MAX_ATTEMPTS=10      # 10 x 20s = ~3.5 minutes max wait
           ATTEMPT=0
           while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              --max-time 15 \
-              "${{ secrets.RENDER_SERVICE_URL }}/health")
+              --max-time 45 \
+              "${{ secrets.RENDER_SERVICE_URL }}/health" || echo "000")
             echo "Attempt $((ATTEMPT+1)): HTTP $STATUS"
             if [ "$STATUS" = "200" ]; then
               echo "Service is ready."
               exit 0
             fi
             ATTEMPT=$((ATTEMPT+1))
-            sleep 15
+            sleep 20
           done
-          echo "ERROR: Render service did not become ready after 3 minutes."
+          echo "ERROR: Render service did not become ready after 3.5 minutes."
           exit 1   # fail loudly rather than calling downstream endpoints on a sleeping service
 
       - name: Generate predictions
