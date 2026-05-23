@@ -4,34 +4,90 @@ A self-running machine learning system that watches every Premier League match,
 predicts outcomes, places virtual bets, and learns from wins and losses — all
 on a free cloud stack with a public live dashboard.
 
-**Starting bankroll:** €100.00 &nbsp;|&nbsp; **Status:** [Live website →](https://bet-epl-phi.vercel.app/)
+**Starting bankroll:** €100.00 &nbsp;|&nbsp; **Status:** [Live dashboard →](https://bet-epl-phi.vercel.app/)
 
 ---
 
 ## How it works
 
 ```
-football-data.org  ──┐
-The Odds API       ──┼──▶  GitHub Actions (cron)
-FBref / Understat  ──┘         │
-                               ▼
-                       Supabase PostgreSQL
-                               │
-                               ▼
-                     XGBoost (outcome probs)
-                               │
-                               ▼
-                     DQN Agent (bet or pass?)
-                               │
-                               ▼
-                       Virtual Bet Logger
-                               │
-                               ▼
-                   Next.js Dashboard on Vercel
+football-data.org        ──┐
+football-data.co.uk      ──┼──▶  GitHub Actions (cron)
+FDCO CSVs (xG proxy)     ──┘           │
+                                       ▼
+                               Supabase PostgreSQL
+                                       │
+                           ┌───────────┴───────────┐
+                           ▼                       ▼
+                   XGBoost predictor         ELO ratings
+                   (3-class softprob)        (K=32, HFA=65)
+                           │
+                           ▼
+                    DQN betting agent
+                    (Q-gate: bet or pass?)
+                           │
+                           ▼
+                    Kelly Criterion
+                    (33% fractional, 20% cap)
+                           │
+                           ▼
+                    Virtual bet logger
+                           │
+                           ▼
+                Next.js dashboard on Vercel
 ```
 
 The model never bets real money. The €100 is a virtual bankroll. All bets are
 hypothetical and logged for analysis.
+
+---
+
+## Model architecture
+
+### XGBoost (outcome predictor)
+
+- **Input:** 16-dim feature vector per match
+- **Output:** calibrated probabilities for HOME / DRAW / AWAY
+- **Features:** ELO ratings, form (5 + 10 games), xG scored/conceded, H2H win rate, injury impact
+- **Training:** Chronological 85/15 split, validates on most recent season
+- **Calibration:** Per-class isotonic regression on validation set
+- **Leakage guard:** `before_date` parameter caps both training labels and the feature cache
+
+### DQN agent (betting decision)
+
+- **State:** 24-dim (16 XGB features + 3 XGBoost probs + 3 implied probs + edge + wallet fraction)
+- **Actions:** `BET_HOME`, `BET_DRAW`, `BET_AWAY`, `PASS`
+- **Reward:** normalised P&L per unit staked, clipped ±2
+- **Gate:** `Q(bet) − Q(PASS) ≥ threshold` to confirm a Kelly suggestion
+
+### Kelly Criterion (stake sizing)
+
+- Bookmaker overround removed via proportional de-vig
+- Minimum edge threshold: 2% after de-vig
+- Fractional Kelly: 33% of full Kelly fraction
+- Hard cap: 20% of bankroll per bet
+
+---
+
+## Odds source
+
+Historical and live odds come from **football-data.co.uk** (free, no API key).
+Pinnacle **opening** lines (`PSH/PSD/PSA`) are used — not closing lines — because
+closing odds reflect late sharp money you can never actually bet at. Bet365
+and market-max lines serve as fallbacks.
+
+---
+
+## Retraining schedule
+
+| Season                     | Trigger       | What retrains                              |
+| -------------------------- | ------------- | ------------------------------------------ |
+| 2024-25 MD 19 (≈ Jan 2025) | Mid-season    | XGBoost (base seasons) + first DQN         |
+| 2024-25 MD 38              | End of season | XGBoost (incl. 2024-25) + full DQN retrain |
+| 2025-26 MD 19 (≈ Jan 2026) | Mid-season    | XGBoost (completed seasons) + DQN update   |
+| 2025-26 MD 38              | End of season | XGBoost (incl. 2025-26) + full DQN retrain |
+
+XGBoost only ever trains on **completed** seasons to avoid partial-season distributional instability. The DQN handles current-season adaptation continuously via the replay buffer.
 
 ---
 
@@ -42,144 +98,140 @@ pl-betting-bot/
 │
 ├── .github/
 │   └── workflows/
-│       ├── fetch_prematch.yml      # Runs 3h before each PL matchday
-│       ├── ingest_results.yml      # Runs the morning after matches finish
-│       └── weekly_retrain.yml      # Retrains XGBoost + DQN every Monday
+│       ├── matchday_orchestrator.yml   # Runs 3h before each PL matchday
+│       ├── ingest_results.yml          # Runs the morning after matches finish
+│       └── monthly_retrain.yml         # Mid-season and end-of-season retrains
 │
 ├── supabase/
 │   └── migrations/
-│       └── 001_initial_schema.sql  # ← Run this first in Supabase SQL editor
+│       └── 001_initial_schema.sql      # ← Run this first in Supabase SQL editor
 │
 ├── backend/
 │   ├── requirements.txt
 │   ├── data_pipeline/
-│   │   ├── fetch_fixtures.py       # football-data.org → matches table
-│   │   ├── fetch_odds.py           # The Odds API → odds table
-│   │   ├── scrape_stats.py         # FBref + Understat → match_stats
-│   │   ├── scrape_injuries.py      # BBC Sport → team_injuries
-│   │   └── update_elo.py           # Calculate ELO after each result
+│   │   ├── fetch_fixtures.py           # football-data.org → matches table
+│   │   ├── fetch_historical_odds.py    # football-data.co.uk → odds table (Pinnacle opening)
+│   │   ├── fetch_odds.py               # Live pre-match odds → odds table
+│   │   ├── odds_validator.py           # Detects and corrects swapped home/away odds
+│   │   ├── scrape_stats.py             # FDCO CSVs → match_stats (xG proxy: 0.30 per SOT)
+│   │   ├── scrape_injuries.py          # Squad availability → team_injuries
+│   │   └── update_elo.py               # ELO ratings (K=32, HFA=65) with kickoff timestamps
 │   ├── model/
-│   │   ├── features.py             # Feature engineering (16-dim state vector)
-│   │   ├── xgboost_model.py        # Train / predict with XGBoost
-│   │   ├── dqn_agent.py            # Deep Q-Network definition + training loop
-│   │   ├── replay_buffer.py        # Experience replay (loads from rl_episodes)
-│   │   └── train.py                # Orchestrates full training pipeline
+│   │   ├── features.py                 # Feature engineering — bulk_fetch with before_date guard
+│   │   ├── xgboost_model.py            # Train / predict — before_date flows to bulk_fetch
+│   │   ├── dqn_agent.py                # Deep Q-Network definition + training loop
+│   │   ├── replay_buffer.py            # Experience replay (loads from rl_episodes)
+│   │   └── train.py                    # Orchestrates full training pipeline
 │   ├── engine/
-│   │   ├── kelly.py                # Kelly Criterion stake sizing
-│   │   ├── bet_placer.py           # Writes bets to DB, updates wallet
-│   │   └── settle_bets.py          # Settles open bets after results come in
+│   │   ├── kelly.py                    # Kelly Criterion stake sizing (33% fractional)
+│   │   ├── bet_placer.py               # Writes bets to DB, updates wallet
+│   │   └── settle_bets.py              # Settles open bets, pushes RL transitions
 │   └── api/
-│       └── main.py                 # FastAPI server — triggered by GitHub Actions
+│       └── main.py                     # FastAPI server — triggered by GitHub Actions
 │
-├── frontend/                       # Next.js app (Phase 7)
+├── frontend/
 │   ├── app/
-│   │   ├── page.tsx                # Home: live balance + last 5 bets
-│   │   └── dashboard/page.tsx      # Charts, filters, history
+│   │   ├── page.tsx                    # Overview: live balance + upcoming fixtures
+│   │   ├── dashboard/page.tsx          # Charts and filters
+│   │   ├── history/page.tsx            # Full bet history
+│   │   └── docs/page.tsx               # Technical documentation
 │   ├── components/
+│   │   ├── ClubBadge.tsx
+│   │   ├── Navbar.tsx
+│   │   └── SortTh.tsx
 │   └── lib/
-│       └── supabase.ts             # Supabase client (anon key, read-only)
+│       └── supabase.ts                 # Supabase client (anon key, read-only)
 │
 ├── scripts/
-│   └── bootstrap_db.py             # ← Run this after the SQL migration
+│   ├── seed_historical_data.py         # One-time: fetch fixtures + stats + ELO for 2020-24
+│   ├── simulate_historical_bets.py     # Backfill bets for 2024-25 and 2025-26
+│   ├── run_simulation.py               # Orchestrator with mid/end-season retrains
+│   └── bootstrap_db.py                 # Seeds teams and wallet row
 │
-├── .env.example                    # Copy to .env and fill in keys
-└── .gitignore
+└── .env.example
 ```
 
 ---
 
-## Setup — Phase 1: Database
+## Setup
 
-### Step 1 — Create a Supabase project
+### Step 1 — Database
 
-1. Go to [supabase.com](https://supabase.com) → New project
-2. Choose a name (e.g. `pl-betting-bot`) and a strong DB password
-3. Pick a region (closest to UK for PL data latency)
-4. Wait ~2 minutes for provisioning
-
-### Step 2 — Run the schema migration
-
-1. In your Supabase dashboard: **SQL Editor → New query**
-2. Paste the entire contents of `supabase/migrations/001_initial_schema.sql`
-3. Click **Run** — you should see "Success. No rows returned"
-4. Go to **Table Editor** — you should see 13 tables
-
-### Step 3 — Get your API keys
-
-From Supabase: **Settings → API**
-
-- Copy `Project URL` → `SUPABASE_URL`
-- Copy `anon / public` key → `SUPABASE_ANON_KEY`
-- Copy `service_role` key → `SUPABASE_SERVICE_KEY`
+1. Create a [Supabase](https://supabase.com) project
+2. **SQL Editor → New query** → paste `supabase/migrations/001_initial_schema.sql` → Run
+3. Copy your `Project URL`, `anon key`, and `service_role key` from **Settings → API**
 
 ```bash
 cp .env.example .env
-# Edit .env with your values
+# Fill in SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_KEY
 ```
 
-### Step 4 — Bootstrap the database
+### Step 2 — Bootstrap
 
 ```bash
-cd pl-betting-bot
-pip install supabase python-dotenv
+pip install -r backend/requirements.txt
 python scripts/bootstrap_db.py
 ```
 
-Expected output:
+### Step 3 — Historical data
 
-```
-=======================================================
-  PL Betting Bot — Database Bootstrap
-=======================================================
+```bash
+# Fetch fixtures + stats + ELO for 2020-24 (training data)
+python scripts/seed_historical_data.py
 
-[1/3] Connecting to Supabase...
-      ✓ Connected successfully
-[2/3] Seeding Premier League teams...
-      ✓ 20 teams upserted
-[3/3] Checking wallet...
-      ✓ Wallet found
-        Balance:       €100.00
-        Inception:     2024-xx-xx
+# Recalculate ELO with correct timestamps (critical — must run before training)
+python -m backend.data_pipeline.update_elo --all-seasons
+
+# Fetch Pinnacle opening odds for 2024-25 and 2025-26 (free, no API key)
+python -m backend.data_pipeline.fetch_historical_odds
 ```
 
-### Step 5 — Verify in Supabase Table Editor
+### Step 4 — Train and simulate
 
-| Table           | Expected rows after bootstrap |
-| --------------- | ----------------------------- |
-| `teams`         | 20                            |
-| `wallet`        | 1 (€100.00 balance)           |
-| `matches`       | 0 (filled by Phase 2)         |
-| `bets`          | 0 (filled by Phase 3+)        |
-| everything else | 0                             |
+```bash
+# Train base XGBoost on 2020-24
+python -m backend.model.train --mode xgboost
 
----
+# Run full simulation (2024-25 + 2025-26 with mid/end-season retrains)
+python scripts/run_simulation.py
+```
 
-## Phases
+### Step 5 — Deploy
 
-| Phase | What gets built                                 |
-| ----- | ----------------------------------------------- |
-| 1     | DB schema + Supabase setup                      |
-| 2     | Data pipeline (fixtures, odds, stats, injuries) |
-| 3     | XGBoost outcome predictor                       |
-| 4     | DQN betting agent                               |
-| 5     | Bet engine + virtual wallet                     |
-| 6     | FastAPI on Render                               |
-| 7     | Next.js frontend on Vercel                      |
-| 8     | GitHub Actions automation                       |
+1. Deploy the FastAPI backend to [Render](https://render.com) (free tier)
+2. Deploy the Next.js frontend to [Vercel](https://vercel.com) (free tier)
+3. Add GitHub Actions secrets: `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `RENDER_DEPLOY_HOOK`
 
 ---
 
-## Free tier limits
+## Free tier usage
 
-| Service           | Free limit                         | Our usage     |
-| ----------------- | ---------------------------------- | ------------- |
-| Supabase          | 500MB DB, 1GB storage              | ~5MB/season   |
-| Vercel            | Unlimited deploys, 100GB bandwidth | ~1GB/month    |
-| Render            | 750h/month (spins down)            | ~2h/month     |
-| GitHub Actions    | 2,000 min/month                    | ~60 min/month |
-| football-data.org | 10 calls/min, all PL data          | ~500/season   |
-| The Odds API      | 500 requests/month                 | ~380/season   |
+| Service             | Free limit            | Our usage                |
+| ------------------- | --------------------- | ------------------------ |
+| Supabase            | 500MB DB, 1GB storage | ~5MB/season              |
+| Vercel              | Unlimited deploys     | ~1GB/month bandwidth     |
+| Render              | 750h/month            | ~2h/month                |
+| GitHub Actions      | 2,000 min/month       | ~1500 min/month          |
+| football-data.org   | 10 calls/min          | ~500/season              |
+| football-data.co.uk | Unlimited             | ~10 CSV downloads/season |
+| the-odds-api.com    | 500 calls/month       | ~60-85 calls/month       |
 
-All comfortably within free limits.
+All comfortably within free limits. No credit card required.
 
 ---
+
+## Important implementation notes
+
+**ELO timestamps matter.** `elo_ratings.calculated_at` must be set to the match
+`kickoff_time`, not the script run time. `features.py` filters ELO with
+`calc_at < before_time` — if `calculated_at` is a 2026 timestamp, every team
+returns 1500.0 for every historical match, killing the strongest predictor.
+
+**Opening odds, not closing.** Using `PSCH/PSCD/PSCA` (Pinnacle closing) as the
+bet price is lookahead bias — you can never actually get closing odds. The fetcher
+uses `PSH/PSD/PSA` (opening) with Bet365 as fallback.
+
+**before_date flows all the way down.** The leakage guard must propagate:
+`run_simulation → train → load_training_data → build_feature_matrix → bulk_fetch`.
+If any link in this chain calls `bulk_fetch()` without `before_date`, the feature
+cache loads future data and XGBoost memorises it.

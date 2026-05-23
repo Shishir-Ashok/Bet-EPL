@@ -20,11 +20,11 @@ name: Matchday orchestrator
 
 on:
   schedule:
-    - cron: "0 * * * *" # every hour, on the hour
+    - cron: "0 */2 * * *" # every 2 hours, on the hour
   workflow_dispatch:
     inputs:
       force_run:
-        description: "Skip fixture check and run the full pipeline anyway"
+        description: "Fixture check and run the full pipeline"
         required: false
         default: "false"
         type: boolean
@@ -50,9 +50,10 @@ jobs:
             exit 0
           fi
 
-          # Window: kickoffs between now+5min and now+95min
-          WINDOW_START=$(date -u -d '+5 minutes'  +%Y-%m-%dT%H:%M:%SZ)
-          WINDOW_END=$(date -u   -d '+95 minutes' +%Y-%m-%dT%H:%M:%SZ)
+          # Window: kickoffs between now+5min and now+125min
+          # Covers the full 2hr gap between runs with 5min overlap on each side
+          WINDOW_START=$(date -u -d '+5 minutes'   +%Y-%m-%dT%H:%M:%SZ)
+          WINDOW_END=$(date -u   -d '+125 minutes' +%Y-%m-%dT%H:%M:%SZ)
 
           echo "Checking for fixtures between ${WINDOW_START} and ${WINDOW_END}..."
 
