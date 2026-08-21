@@ -89,7 +89,7 @@ def _get_elos(home_team_id: int, away_team_id: int) -> tuple[float, float]:
                 supabase.table("elo_ratings")
                 .select("elo")
                 .eq("team_id", team_id)
-                .order("updated_at", desc=True)
+                .order("calculated_at", desc=True)
                 .limit(1)
                 .execute()
                 .data
