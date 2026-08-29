@@ -284,7 +284,7 @@ def load_model(version_tag: Optional[str] = None) -> CalibratedModel:
         local_path   = os.path.join(MODEL_DIR, filename)
 
     local_path = ensure_local(storage_path, local_path)
-
+    print("LOCAL PATH: ", local_path)
     with open(local_path, "rb") as f:
         return pickle.load(f)
 

@@ -21,7 +21,6 @@ from backend.db import supabase
 BUCKET = os.environ.get("SUPABASE_STORAGE_BUCKET", "models")
 MODEL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "checkpoints"))
 
-
 def upload(local_path: str) -> str:
     """
     Uploads a model file to Supabase Storage.
